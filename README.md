@@ -37,6 +37,21 @@ await llm.send('Write a hello world function in Python');
 // The response is automatically added to the chat history
 ```
 
+```javascript
+const { createChat, consoleLogHooks } = require('./viib-etch');
+
+// Create a new chat session
+const coder = createChat('gpt-5.1-coder', true, null, consoleLogHooks({brief: true}))
+
+// move to the coding project directory if different
+process.chdir('/data/project-a')
+
+// Let it implement UI.
+await coder.send('Implement https server and chat UI, composed with messages at top and user text field at bottom. Make UI work with backend server. Make reasonable assumptions', { stream: true});
+
+```
+
+
 ## Configuration
 
 ### Models Configuration
