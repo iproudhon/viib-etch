@@ -1,0 +1,292 @@
+[
+  {
+    "type": "function",
+    "name": "run_terminal_cmd",
+    "disallow_in_ask_mode": true,
+    "description": "Suggest a terminal command for the user to execute.\nThe user can reject, modify, or approve the command. If modified, incorporate those changes.\nExecution only occurs after user approval, which may be delayed. Do not assume execution has begun.\nIf awaiting approval, the command has not started.\nFollow these rules:\n1. The conversation indicates whether you're in the same shell as a previous step or a new one.\n2. In a new shell, change to the correct directory and perform any necessary setup before running the command.\n3. In the same shell, state persists (e.g., a previous `cd` remains in effect for subsequent tool calls).\n4. For long-running or indefinite commands, run them in the background by setting `is_background` to true instead of modifying the command itself.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Command string to run in the terminal"
+        },
+        "is_background": {
+          "type": "boolean",
+          "description": "Set to true to execute the command as a background process",
+          "default": "False"
+        },
+        "explanation": {
+          "type": "string",
+          "description": "Brief explanation of why this command is necessary and how it helps achieve the objective."
+        }
+      },
+      "required": [
+        "command",
+        "explanation"
+      ]
+    },
+    "strict": false
+  },
+  {
+    "type": "function",
+    "name": "rg",
+    "description": "Perform text searches across the workspace using ripgrep.\n\n- Prefer this tool over shell rg; it honors .gitignore\n- Searches start at the workspace root by default; specify a path (absolute or relative) to limit scope\n- Provide a regex pattern; escape special characters, e.g. \"functionCall\\(\", \"\\{\", \"\\}\"\n- Use type filters rather than broad globs; wildcard patterns like * ignore exclusion rules and reduce speed\n- Activate multiline mode only when matches cross line boundaries—it impacts performance\n- Context options (-A, -B, -C) apply solely to content output mode\n- \"at least …\" in results indicates truncation; refine the query or increase head_limit",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "description": "Regex pattern to match (ripgrep format); escape special regex characters when necessary."
+        },
+        "path": {
+          "type": "string",
+          "description": "Optional search path, either absolute or relative to workspace root; defaults to workspace root if omitted."
+        },
+        "glob": {
+          "type": "string",
+          "description": "Optional file pattern filter (ripgrep --glob format, e.g. *.ts); only use when it restricts scope—broad patterns may ignore exclusion rules."
+        },
+        "output_mode": {
+          "type": "string",
+          "description": "Result format: content displays matching lines (default), files_with_matches returns file paths, count provides match statistics.",
+          "enum": "['content', 'files_with_matches', 'count']"
+        },
+        "-B": {
+          "type": "number",
+          "description": "Number of lines to show before each match (ripgrep -B). Only effective with output_mode: content; otherwise ignored."
+        },
+        "-A": {
+          "type": "number",
+          "description": "Number of lines to show after each match (ripgrep -A). Only effective with output_mode: content; otherwise ignored."
+        },
+        "-C": {
+          "type": "number",
+          "description": "Number of lines to show both before and after each match (ripgrep -C). Only effective with output_mode: content; otherwise ignored."
+        },
+        "-i": {
+          "type": "boolean",
+          "description": "Enable case-insensitive matching when set to true (ripgrep -i)."
+        },
+        "type": {
+          "type": "string",
+          "description": "File type filter (ripgrep --type, e.g. ts or tsx); honors ignore files and typically performs better than wide glob patterns."
+        },
+        "head_limit": {
+          "type": "number",
+          "description": "Maximum number of results to return: limits lines for content mode, file count for files_with_matches, or entries for count mode."
+        },
+        "multiline": {
+          "type": "boolean",
+          "description": "Enable multiline mode when true, allowing . to match newlines (ripgrep -U --multiline-dotall); use cautiously as it reduces search optimizations."
+        }
+      },
+      "required": [
+        "pattern"
+      ]
+    },
+    "strict": false
+  },
+  {
+    "type": "function",
+    "name": "delete_file",
+    "disallow_in_ask_mode": true,
+    "description": "Remove a file at the given path relative to the workspace root; handles missing files, security restrictions, and deletion failures gracefully.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "target_file": {
+          "type": "string",
+          "description": "File path to remove, relative to the workspace root directory."
+        }
+      },
+      "required": [
+        "target_file"
+      ]
+    },
+    "strict": false
+  },
+  {
+    "type": "function",
+    "name": "web_search",
+    "description": "Query the web for current information on any subject; useful for recent data not available in training data, such as news or technology updates. Returns text excerpts and source URLs.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "search_term": {
+          "type": "string",
+          "description": "Search query string with relevant keywords; for technical topics, include version numbers or dates when applicable."
+        }
+      },
+      "required": [
+        "search_term"
+      ]
+    },
+    "strict": false
+  },
+  {
+    "type": "function",
+    "name": "update_memory",
+    "description": "Manage entries in a persistent knowledge base for AI reference.\nWhen the user extends an existing memory, use action 'update'.\nWhen the user contradicts an existing memory, use action 'delete' (not 'update' or 'create').\nFor updates or deletions, provide the existing_knowledge_id parameter.\nWhen the user requests to remember, save, or create a memory, use action 'create'.\nDo not use 'create' unless the user explicitly asks to remember or save information.\n",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Short title for the memory entry, used for later lookup and retrieval. Should concisely summarize the memory content. Required when action is 'create' or 'update'."
+        },
+        "knowledge_to_store": {
+          "type": "string",
+          "description": "The memory content to store, limited to one paragraph. When updating or contradicting a previous memory, do not reference the old memory. Required when action is 'create' or 'update'."
+        },
+        "action": {
+          "type": "string",
+          "enum": "['create', 'update', 'delete']",
+          "description": "Operation to execute on the knowledge base. Defaults to 'create' if omitted for backward compatibility."
+        },
+        "existing_knowledge_id": {
+          "type": "string",
+          "description": "ID of the existing memory entry to modify or remove. Required when action is 'update' or 'delete'."
+        }
+      },
+      "required": []
+    },
+    "strict": false
+  },
+  {
+    "type": "function",
+    "name": "read_lints",
+    "description": "Read linter warnings and errors. Contains IDE diagnostics only, which may sometimes be stale. Use optional paths array to restrict scope. Omit for files you haven't modified and disregard pre-existing issues.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "paths": {
+          "type": "array",
+          "description": "Optional array of file or directory paths to check for linting issues.",
+          "items": "{'type': 'string'}"
+        }
+      },
+      "required": []
+    },
+    "strict": false
+  },
+  {
+    "type": "function",
+    "name": "todo_write",
+    "description": "Modify the task list. Supply an array of todo items, each containing an id, content, and status. Set merge=true to modify existing tasks.\n\n### Guidelines\n- Only one task may be in_progress simultaneously.\n- Immediately cancel tasks that are no longer required.\n- Consider setting the first todo to in_progress when creating it\n- Combine todo updates with other tool calls in parallel\n",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "merge": {
+          "type": "boolean",
+          "description": "If true, merge the provided todos with existing ones by matching id fields. Unchanged properties can be omitted. If false, the new todos replace all existing todos."
+        },
+        "todos": {
+          "type": "array",
+          "description": "List of todo items to save to the workspace",
+          "items": "{'type': 'object', 'properties': {'content': {'type': 'string', 'description': 'The description/content of the todo item'}, 'status': {'type': 'string', 'enum': ['pending', 'in_progress', 'completed', 'cancelled'], 'description': 'The current status of the todo item'}, 'id': {'type': 'string', 'description': 'Unique identifier for the todo item'}}, 'required': ['content', 'status', 'id']}",
+          "minItems": "2"
+        }
+      },
+      "required": [
+        "merge",
+        "todos"
+      ]
+    },
+    "strict": false
+  },
+  {
+    "type": "function",
+    "name": "apply_patch",
+    "disallow_in_ask_mode": true,
+    "description": "Apply a diff/patch to a file using `<apply_patch_command>` with functions.apply_patch, where `<apply_patch_command>` is a specially formatted patch command. Call functions.apply_patch directly without prefixing with `bash -lc`. A valid `<apply_patch_command>` has this structure:\n*** Begin Patch\n[YOUR_PATCH]\n*** End Patch\n\nWhere [YOUR_PATCH] contains the patch content in V4A diff format.\n*** [ACTION] File: [path/to/file] -> ACTION can be Add or Update.\nFor each code section to change, use this pattern:\n[context_before]\n- [old_code] -> Prefix old code with a minus sign.\n+ [new_code] -> Prefix replacement code with a plus sign.\n[context_after]\nFor [context_before] and [context_after]:\n- Use @@ to indicate the class or function containing the change, optionally including 1-3 unchanged lines above and below for disambiguation. Example:\n@@ class BaseClass\n[2 lines of pre-context]\n- [old_code]\n+ [new_code]\n[2 lines of post-context]\n- For more precision, nest multiple `@@` statements to specify both class and function context. Example:\n@@ class BaseClass\n@@ \tdef method():\n[2 lines of pre-context]\n- [old_code]\n+ [new_code]\n[2 lines of post-context]\nThis diff format uses context rather than line numbers to identify code locations.\n\nDo NOT include line number prefixes in patch content.\nDo NOT use other patch methods in the container; they will not work. Only use `functions.apply_patch`.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "patchCommand": {
+          "type": "string",
+          "description": "Patch command string in V4A diff format, beginning with '*** Begin Patch' and ending with '*** End Patch'"
+        }
+      },
+      "required": [
+        "patchCommand"
+      ]
+    },
+    "format": {
+      "type": "grammar",
+      "definition": "start: begin_patch hunk end_patch\nbegin_patch: \"*** Begin Patch\" LF\nend_patch: \"*** End Patch\" LF?\n\nhunk: add_hunk | update_hunk\nadd_hunk: \"*** Add File: \" filename LF add_line+\nupdate_hunk: \"*** Update File: \" filename LF change?\n\nfilename: /(.+)/\nadd_line: \"+\" /(.*)/ LF -> line\n\nchange: (change_context | change_line)+ eof_line?\n\nchange_context: (\"@@\" | \"@@ \" /(.+)/) LF\nchange_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\neof_line: \"*** End of File\" LF\n\n%import common.LF\n",
+      "syntax": "lark"
+    }
+  },
+  {
+    "type": "function",
+    "name": "read_file",
+    "description": "Retrieve the contents of a file.\n\nUsage:\n- Optionally specify a line offset and limit for large files, though reading the entire file (by omitting these parameters) is recommended.\n- Output lines are numbered starting at 1, formatted as \"Lxxx:LINE_CONTENT\", e.g. \"L123:LINE_CONTENT\".\n\nImage Support:\n- This tool can read image files when provided with the correct path.\n- Supported formats: jpeg/jpg, png, gif, webp.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "target_file": {
+          "type": "string",
+          "description": "File path to read, either relative to the workspace or absolute. Absolute paths are used as-is."
+        },
+        "offset": {
+          "type": "integer",
+          "description": "Starting line number for reading. Only specify when the file is too large to read entirely."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Maximum number of lines to read. Only specify when the file is too large to read entirely."
+        }
+      },
+      "required": [
+        "target_file"
+      ]
+    },
+    "strict": false
+  },
+  {
+    "type": "function",
+    "name": "list_dir",
+    "description": "Display the contents of a directory at the specified path.\nThe 'target_directory' parameter accepts paths relative to the workspace root or absolute paths.\nOptionally provide an array of glob patterns via \"ignore_globs\" to exclude matching items.\n\nAdditional notes:\n- Dot-files and dot-directories are not included in the results.\n",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "target_directory": {
+          "type": "string",
+          "description": "Directory path whose contents should be listed."
+        },
+        "ignore_globs": {
+          "type": "array",
+          "items": "{'type': 'string'}",
+          "description": "Optional array of glob patterns to exclude from results.\nPatterns match anywhere within the target directory. Patterns without \"**/\" prefix are automatically prepended with \"**/\".\n\nExamples:\n\t- \"*.js\" (becomes \"**/*.js\") - exclude all .js files\n\t- \"**/node_modules/**\" - exclude all node_modules directories\n\t- \"**/test/**/test_*.ts\" - exclude all test_*.ts files in any test directory\n"
+        }
+      },
+      "required": [
+        "target_directory"
+      ]
+    },
+    "strict": false
+  },
+  {
+    "type": "function",
+    "name": "glob_file_search",
+    "description": "\nSearch for files that match a glob pattern\n\n- Efficiently handles codebases of any scale\n- Returns matching file paths ordered by modification time (newest first)\n- Use when locating files by naming patterns\n- Multiple tools can be called in one response; it's preferable to run several potentially useful searches together in parallel.\n",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "target_directory": {
+          "type": "string",
+          "description": "Directory path to search within. If omitted, defaults to workspace root directories."
+        },
+        "glob_pattern": {
+          "type": "string",
+          "description": "Glob pattern used to match file names.\nPatterns without \"**/\" prefix are automatically prepended with \"**/\" to enable recursive searching.\n\nExamples:\n\t- \"*.js\" (becomes \"**/*.js\") - locate all .js files\n\t- \"**/node_modules/**\" - locate all node_modules directories\n\t- \"**/test/**/test_*.ts\" - locate all test_*.ts files in any test directory\n"
+        }
+      },
+      "required": [
+        "glob_pattern"
+      ]
+    },
+    "strict": false
+  }
+]
