@@ -215,6 +215,54 @@ async function walkFiles(rootDir, { includeDotfiles = false } = {}) {
   return out;
 }
 
+async function generateDiff(beforeContent, afterContent, filePath) {
+  return new Promise((resolve, reject) => {
+    const tmpDir = os.tmpdir();
+    const originalFile = path.join(tmpDir, `diff-orig-${Date.now()}-${Math.random().toString(36).substring(7)}`);
+    const currentFile = path.join(tmpDir, `diff-curr-${Date.now()}-${Math.random().toString(36).substring(7)}`);
+    
+    let cleanup = () => {
+      try { fs.unlinkSync(originalFile); } catch {}
+      try { fs.unlinkSync(currentFile); } catch {}
+    };
+    
+    fs.writeFileSync(originalFile, beforeContent, 'utf8');
+    fs.writeFileSync(currentFile, afterContent, 'utf8');
+    
+    const diffProcess = spawn('diff', ['-u', originalFile, currentFile], {
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    
+    let stdout = '';
+    let stderr = '';
+    
+    diffProcess.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+    
+    diffProcess.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+    
+    diffProcess.on('close', (code) => {
+      cleanup();
+      // diff returns 0 if files are identical, 1 if different, 2 on error
+      if (code === 2) {
+        reject(new Error(`diff command failed: ${stderr}`));
+      } else {
+        // Normalize the diff output to use the actual file path
+        const normalizedDiff = stdout.replace(/^--- .+\n/, `--- ${filePath}\n`).replace(/^\+\+\+ .+\n/, `+++ ${filePath}\n`);
+        resolve(normalizedDiff || '');
+      }
+    });
+    
+    diffProcess.on('error', (err) => {
+      cleanup();
+      reject(err);
+    });
+  });
+}
+
 // Tool handlers
 const toolHandlers = {
   async todo_write(args, context) {
@@ -400,18 +448,45 @@ const toolHandlers = {
     return output;
   },
 
-  async delete_file(args) {
+  async delete_file(args, context) {
     if (!args || !args.target_file) {
       throw new Error('delete_file: "target_file" is required');
     }
     const target = resolveTargetPath(args.target_file);
+    const baseRoot = process.cwd();
+    const relPath = path.relative(baseRoot, target);
+    const session = context && context.session;
+    const fileOriginals = session && session.data ? (session.data.fileOriginals || (session.data.fileOriginals = {})) : null;
+    
+    let beforeContent = null;
     try {
-      await fsp.unlink(target);
-      return { ok: true, deleted: target };
+      beforeContent = await fsp.readFile(target, 'utf-8');
     } catch (err) {
       if (err && err.code === 'ENOENT') {
         return { ok: false, deleted: false, error: 'File does not exist', target };
       }
+      return { ok: false, deleted: false, error: err?.message || String(err), target };
+    }
+    
+    // Store original content if not already stored
+    if (fileOriginals && !(relPath in fileOriginals)) {
+      fileOriginals[relPath] = beforeContent;
+    }
+    
+    try {
+      await fsp.unlink(target);
+      const result = { ok: true, deleted: target };
+      
+      // Generate diff for deleted file
+      try {
+        const diff = await generateDiff(beforeContent, '', relPath);
+        result._diff = diff;
+      } catch (err) {
+        // Ignore diff generation errors
+      }
+      
+      return result;
+    } catch (err) {
       return { ok: false, deleted: false, error: err?.message || String(err), target };
     }
   },
@@ -599,7 +674,7 @@ const toolHandlers = {
       .join('\n');
   },
 
-  async apply_patch(args) {
+  async apply_patch(args, context) {
     const patchCommand = args && typeof args.patchCommand === 'string' ? args.patchCommand : null;
     if (!patchCommand) {
       throw new Error('apply_patch: "patchCommand" is required');
@@ -692,16 +767,33 @@ const toolHandlers = {
 
     const baseRoot = process.cwd();
     const results = [];
+    const session = context && context.session;
+    const fileOriginals = session && session.data ? (session.data.fileOriginals || (session.data.fileOriginals = {})) : null;
+    const fileDiffs = [];
 
     for (const hunk of hunks) {
       const filePath = path.isAbsolute(hunk.filename)
         ? hunk.filename
         : path.resolve(baseRoot, hunk.filename);
+      const relPath = path.relative(baseRoot, filePath);
 
       if (hunk.type === 'add') {
+        // Store original as empty for new files
+        if (fileOriginals && !(relPath in fileOriginals)) {
+          fileOriginals[relPath] = '';
+        }
+        const newContent = hunk.addLines.join('\n');
         await fsp.mkdir(path.dirname(filePath), { recursive: true });
-        await fsp.writeFile(filePath, hunk.addLines.join('\n'), 'utf-8');
+        await fsp.writeFile(filePath, newContent, 'utf-8');
         results.push({ file: hunk.filename, action: 'created' });
+        
+        // Generate diff for new file
+        try {
+          const diff = await generateDiff('', newContent, relPath);
+          fileDiffs.push({ file: relPath, diff });
+        } catch (err) {
+          // Ignore diff generation errors
+        }
         continue;
       }
 
@@ -714,6 +806,11 @@ const toolHandlers = {
           throw new Error(`apply_patch: file does not exist: ${hunk.filename}`);
         }
         throw err;
+      }
+
+      // Store original content if not already stored
+      if (fileOriginals && !(relPath in fileOriginals)) {
+        fileOriginals[relPath] = original;
       }
 
       let fileLines = splitLinesPreserveEmpty(original);
@@ -777,15 +874,32 @@ const toolHandlers = {
         }
       }
 
-      await fsp.writeFile(filePath, fileLines.join('\n'), 'utf-8');
+      const newContent = fileLines.join('\n');
+      await fsp.writeFile(filePath, newContent, 'utf-8');
       results.push({ file: hunk.filename, action: 'updated' });
+      
+      // Generate diff
+      try {
+        // Diff should represent the delta applied by THIS patch invocation
+        // (compare content as it was just before applying this patch to the new content).
+        const diff = await generateDiff(original, newContent, relPath);
+        fileDiffs.push({ file: relPath, diff });
+      } catch (err) {
+        // Ignore diff generation errors
+      }
     }
+
+    const combinedDiff = fileDiffs.length
+      ? fileDiffs.map(d => d.diff).filter(Boolean).join('\n')
+      : null;
 
     return {
       success: true,
       message: `Successfully applied patch to ${results.length} file(s)`,
       results,
-    };
+      _diff: combinedDiff,
+      _patchCommand: patchCommand,
+    }
   },
 }
 

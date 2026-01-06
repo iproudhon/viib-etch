@@ -1791,7 +1791,27 @@ class ChatLLM {
         
         const toolResult = await executeTool(toolCall.function.name, args, context);
         await this.callHook('onToolCallData', toolCall, { phase: 'result', result: toolResult });
-        const content = typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult);
+        
+        // Store diff in ChatSession.data if present, then remove from result
+        let cleanedResult = toolResult;
+        if (toolResult && typeof toolResult === 'object' && (toolResult._diff || toolResult._patchCommand)) {
+          if (!this.chat.data.diffs) {
+            this.chat.data.diffs = {};
+          }
+          this.chat.data.diffs[toolCall.id] = {
+            diff: toolResult._diff || null,
+            patchCommand: toolResult._patchCommand || null,
+            toolName: toolCall.function.name
+          };
+          this.chat.save();
+          
+          // Remove _diff and _patchCommand from result before storing in message
+          cleanedResult = { ...toolResult };
+          delete cleanedResult._diff;
+          delete cleanedResult._patchCommand;
+        }
+        
+        const content = typeof cleanedResult === 'string' ? cleanedResult : JSON.stringify(cleanedResult);
         
         await this.addToolMessage(
           toolCall.id,
