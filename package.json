@@ -1,5 +1,36 @@
 {
+  "name": "viib-etch",
+  "version": "0.1.0",
+  "description": "A powerful Node.js library for building coding agents with LLM integration",
+  "main": "viib-etch.js",
+  "files": [
+    "viib-etch.js",
+    "viib-etch-tools.js",
+    "viib-etch-tools.json",
+    "viib-etch-models.json",
+    "viib-etch.*.prompt",
+    "README.md",
+    "LICENSE"
+  ],
+  "author": "iproudhon",
+  "license": "SEE LICENSE IN LICENSE",
   "dependencies": {
     "openai": "^6.15.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/iproudhon/viib-etch.git"
+  },
+  "keywords": [
+    "ai",
+    "coding",
+    "agent",
+    "llm",
+    "openai",
+    "openrouter",
+    "viib",
+    "gemini",
+    "tool-calling",
+    "cursor"
+  ]
 }
