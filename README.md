@@ -23,25 +23,26 @@ npm install
 ## Quick Start
 
 ```javascript
-const { createChat } = require('./viib-etch');
+const { createChat, openChat } = require('./viib-etch');
 
-// Create a new chat session
-const llm = createChat('gpt-5.1-coder', false, null, {
-  onResponseData: (chunk) => process.stdout.write(chunk),
-  onToolCallStart: (toolCall) => console.log(`Tool: ${toolCall.function.name}`)
-});
+// Create a new chat session with console logging
+const llm = createChat('gpt-5.1-coder', false, null, 'console');
 
 // Send a message
 await llm.send('Write a hello world function in Python');
 
 // The response is automatically added to the chat history
+
+// Later, open the same chat session
+const llm2 = openChat(llm.chat.id, null, 'console');
+await llm2.send('Now add error handling');
 ```
 
 ```javascript
-const { createChat, consoleLogHooks } = require('./viib-etch');
+const { createChat } = require('./viib-etch');
 
-// Create a new chat session
-const coder = createChat('gpt-5.1-coder', true, null, consoleLogHooks({brief: true}))
+// Create a new chat session with brief logging (string shortcut)
+const coder = createChat('gpt-5.1-coder', true, null, 'brief')
 
 // move to the coding project directory if different
 process.chdir('/data/project-a')
@@ -234,13 +235,14 @@ const {
   loadChat,
   listChatSessions,
   createChat,
+  openChat,
   consoleLogHooks
 } = require('./viib-etch');
 
 // Load models
 const models = loadModels('viib-etch-models.json');
 
-// Load a chat session
+// Load a chat session (returns ChatSession)
 const chat = loadChat('chat-id-here');
 
 // List all chat sessions
@@ -249,10 +251,19 @@ sessions.forEach(s => {
   console.log(`${s.id}: ${s.title} (${s.message_count} messages)`);
 });
 
-// Create chat with console logging hooks
-const llm = createChat('gpt-5.1-coder', false, null, 
+// Create chat with string hooks (convenient shortcuts)
+const llm1 = createChat('gpt-5.1-coder', false, null, 'console');  // Full console logging
+const llm2 = createChat('gpt-5.1-coder', false, null, 'brief');     // Brief console logging
+
+// Create chat with custom hooks object
+const llm3 = createChat('gpt-5.1-coder', false, null, 
   consoleLogHooks({ response: true, reasoning: true, tools: true })
 );
+
+// Open an existing chat session (returns ChatLLM)
+const llm4 = openChat('chat-id-here', null, 'console');  // With console hooks
+const llm5 = openChat('chat-id-here', null, 'brief');    // With brief hooks
+const llm6 = openChat('chat-id-here', null, customHooks); // With custom hooks
 ```
 
 ## Examples
@@ -262,8 +273,13 @@ const llm = createChat('gpt-5.1-coder', false, null,
 ```javascript
 const { createChat } = require('./viib-etch');
 
+// Simple chat
 const llm = createChat('gpt-4.1-mini', false);
 await llm.send('Hello!');
+
+// With console logging
+const llm2 = createChat('gpt-4.1-mini', false, null, 'console');
+await llm2.send('Hello!');
 ```
 
 ### Chat with Tools
@@ -286,14 +302,27 @@ await llm.send('Read package.json and update the version to 2.0.0');
 ### Persistent Chat Sessions
 
 ```javascript
-const { ChatLLM } = require('./viib-etch');
+const { createChat, openChat } = require('./viib-etch');
+
+// Create persistent session
+const llm = createChat('gpt-5.1-coder', true, null, 'console');
+// Session is automatically saved to ./chats/
+
+// Later, open the session (easier than manual loading)
+const llm2 = openChat(llm.chat.id, null, 'console');
+await llm2.send('Continue from where we left off');
+```
+
+Or using the lower-level API:
+
+```javascript
+const { ChatLLM, loadChat } = require('./viib-etch');
 
 // Create persistent session
 const llm = ChatLLM.newChatSession('gpt-5.1-coder', true, null);
 // Session is automatically saved to ./chats/
 
-// Later, load the session
-const { loadChat } = require('./viib-etch');
+// Later, load the session manually
 const loaded = loadChat(llm.chat.id);
 const llm2 = new ChatLLM(null, loaded);
 ```

@@ -1838,6 +1838,63 @@ function consoleLogHooks(opts = {}) {
   };
 }
 
+// createChat(model_name, persistent=false, tools=null, hooks={})
+// hooks can be: "console" | "brief" | hooks object
+function createChat(modelName, persistent = false, tools = null, hooks = {}) {
+  let resolvedHooks = hooks;
+  if (typeof hooks === 'string') {
+    if (hooks === 'console') {
+      resolvedHooks = consoleLogHooks();
+    } else if (hooks === 'brief') {
+      resolvedHooks = consoleLogHooks({ brief: true });
+    }
+    // Otherwise, treat as hooks object (though string won't work, but keep for consistency)
+  }
+  return ChatLLM.newChatSession(modelName, persistent, tools, resolvedHooks);
+}
+
+// openChat(chatId, tools=null, hooks={})
+// Load an existing chat session and return a ChatLLM instance
+// hooks can be: "console" | "brief" | hooks object
+function openChat(chatId, tools = null, hooks = {}) {
+  const chat = ChatSession.load(chatId);
+  if (!chat) {
+    throw new Error(`Chat session not found: ${chatId}`);
+  }
+  
+  const modelName = chat.model_name;
+  if (!modelName) {
+    throw new Error(`Chat session ${chatId} has no model_name`);
+  }
+  
+  // Resolve hooks
+  let resolvedHooks = hooks;
+  if (typeof hooks === 'string') {
+    if (hooks === 'console') {
+      resolvedHooks = consoleLogHooks();
+    } else if (hooks === 'brief') {
+      resolvedHooks = consoleLogHooks({ brief: true });
+    }
+  }
+  
+  // If caller didn't provide tools, default to model's configured tool-name list (if any)
+  if (tools === null || tools === undefined) {
+    try {
+      const models = ChatModel.loadModels();
+      const resolved = models.find(m => m.name === modelName);
+      if (resolved && Array.isArray(resolved.tools) && resolved.tools.length > 0) {
+        const { getToolDefinitions } = require(path.join(__dirname, 'viib-etch-tools'));
+        const toolsPath = path.join(getBaseDir(), 'viib-etch-tools.json');
+        tools = getToolDefinitions(toolsPath, resolved.tools);
+      }
+    } catch (e) {
+      // Best-effort only; fall back to no tools.
+    }
+  }
+  
+  return new ChatLLM(modelName, chat, tools, resolvedHooks);
+}
+
 // Export classes and convenience functions
 module.exports = {
   ChatModel,
@@ -1853,8 +1910,7 @@ module.exports = {
   loadModels: (file) => ChatModel.loadModels(file),
   loadChat: (chatId) => ChatSession.load(chatId),
   listChatSessions: () => ChatSession.listChatSessions(),
-  // createChat(model_name, persistent=false, tools=null, hooks={})
-  createChat: (modelName, persistent = false, tools = null, hooks = {}) =>
-    ChatLLM.newChatSession(modelName, persistent, tools, hooks),
+  createChat,
+  openChat,
 };
 

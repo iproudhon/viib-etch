@@ -8,7 +8,8 @@ const {
   loadModels,
   loadChat,
   listChatSessions,
-  createChat
+  createChat,
+  openChat
 } = require('./viib-etch.js');
 
 async function testModelDefaultTools() {
@@ -294,6 +295,97 @@ async function testConvenienceFunctions(models) {
   console.log(`\nListed ${sessions.length} chat sessions`);
 }
 
+async function testCreateChatAndOpenChat(models) {
+  console.log('\n=== Test: createChat and openChat ===');
+  
+  if (!models || models.length === 0) {
+    console.log('Skipping createChat/openChat tests - no models available');
+    return;
+  }
+  
+  const modelName = models[0].name;
+  
+  // Test 1: createChat with "console" hooks
+  console.log('\n  Test 1: createChat with "console" hooks');
+  const llm1 = createChat(modelName, true, null, 'console');
+  if (!llm1 || !llm1.chat) {
+    throw new Error('createChat with "console" hooks failed to create ChatLLM');
+  }
+  if (!llm1.hooks || !llm1.hooks.onResponseData) {
+    throw new Error('createChat with "console" hooks should have onResponseData hook');
+  }
+  console.log(`  ✓ Created chat: ${llm1.chat.id}`);
+  
+  // Test 2: createChat with "brief" hooks
+  console.log('\n  Test 2: createChat with "brief" hooks');
+  const llm2 = createChat(modelName, true, null, 'brief');
+  if (!llm2 || !llm2.chat) {
+    throw new Error('createChat with "brief" hooks failed to create ChatLLM');
+  }
+  console.log(`  ✓ Created chat: ${llm2.chat.id}`);
+  
+  // Test 3: createChat with object hooks
+  console.log('\n  Test 3: createChat with object hooks');
+  const customHooks = {
+    onResponseStart: () => console.log('  [Custom] Response started'),
+    onResponseData: (chunk) => process.stdout.write(chunk)
+  };
+  const llm3 = createChat(modelName, true, null, customHooks);
+  if (!llm3 || !llm3.chat) {
+    throw new Error('createChat with object hooks failed to create ChatLLM');
+  }
+  if (llm3.hooks.onResponseStart !== customHooks.onResponseStart) {
+    throw new Error('createChat with object hooks should preserve hook functions');
+  }
+  console.log(`  ✓ Created chat: ${llm3.chat.id}`);
+  
+  // Test 4: openChat with valid chat ID
+  console.log('\n  Test 4: openChat with valid chat ID');
+  const testChatId = llm1.chat.id;
+  const llm4 = openChat(testChatId, null, 'console');
+  if (!llm4 || !llm4.chat) {
+    throw new Error('openChat failed to create ChatLLM from existing chat');
+  }
+  if (llm4.chat.id !== testChatId) {
+    throw new Error(`openChat chat ID mismatch: expected ${testChatId}, got ${llm4.chat.id}`);
+  }
+  if (llm4.chat.model_name !== modelName) {
+    throw new Error(`openChat model name mismatch: expected ${modelName}, got ${llm4.chat.model_name}`);
+  }
+  console.log(`  ✓ Opened chat: ${llm4.chat.id}`);
+  
+  // Test 5: openChat with "brief" hooks
+  console.log('\n  Test 5: openChat with "brief" hooks');
+  const llm5 = openChat(testChatId, null, 'brief');
+  if (!llm5 || !llm5.chat) {
+    throw new Error('openChat with "brief" hooks failed');
+  }
+  console.log(`  ✓ Opened chat with brief hooks: ${llm5.chat.id}`);
+  
+  // Test 6: openChat error handling - invalid chat ID
+  console.log('\n  Test 6: openChat error handling (invalid chat ID)');
+  try {
+    openChat('invalid-chat-id-12345', null, {});
+    throw new Error('openChat should throw error for invalid chat ID');
+  } catch (err) {
+    if (!err.message || !err.message.includes('not found')) {
+      throw new Error(`Expected "not found" error, got: ${err.message}`);
+    }
+    console.log('  ✓ Correctly throws error for invalid chat ID');
+  }
+  
+  // Test 7: Verify openChat preserves chat history
+  console.log('\n  Test 7: Verify openChat preserves chat history');
+  await llm1.addUserMessage('Test message for history');
+  const llm6 = openChat(testChatId);
+  if (llm6.chat.messages.length < llm1.chat.messages.length) {
+    throw new Error('openChat should preserve all messages from original chat');
+  }
+  console.log(`  ✓ Chat history preserved (${llm6.chat.messages.length} messages)`);
+  
+  console.log('\n  ✓ All createChat and openChat tests passed');
+}
+
 async function testReasoningHooks(models) {
   console.log('\n=== Test: Reasoning Hooks ===');
   
@@ -556,6 +648,14 @@ async function runTests() {
     // Test 5: Convenience functions
     await testConvenienceFunctions(models);
     
+    // Test 5.5: createChat and openChat
+    try {
+      await testCreateChatAndOpenChat(models);
+    } catch (err) {
+      console.error('\nTest failed: createChat and openChat');
+      hasErrors = true;
+    }
+    
     // Test 6: Reasoning hooks
     try {
       await testReasoningHooks(models);
@@ -607,6 +707,7 @@ module.exports = {
   testChatLLM,
   testToolCalling,
   testConvenienceFunctions,
+  testCreateChatAndOpenChat,
   testReasoningHooks,
   testResponsesAPI,
   testInvalidResponseId,
