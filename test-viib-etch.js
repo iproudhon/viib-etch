@@ -135,12 +135,19 @@ async function testChatLLM(models) {
   console.log(`Using model: ${model.name}`);
   
   // Test creating new chat session via ChatLLM
+  let titleGenerated = false;
+  let generatedTitle = null;
   const llm = ChatLLM.newChatSession(model.name, false, null, {
     onResponseStart: () => console.log('  [Hook] Response started'),
     onResponseData: (chunk) => process.stdout.write(chunk),
     onResponseDone: (content) => console.log(`\n  [Hook] Response done (${content.length} chars)`),
     onToolCallStart: (toolCall) => console.log(`  [Hook] Tool call started: ${toolCall.function.name}`),
-    onToolCallEnd: (toolCall) => console.log(`  [Hook] Tool call ended: ${toolCall.function.name}`)
+    onToolCallEnd: (toolCall) => console.log(`  [Hook] Tool call ended: ${toolCall.function.name}`),
+    onTitle: (title) => {
+      titleGenerated = true;
+      generatedTitle = title;
+      console.log(`  [Hook] Title generated: ${title}`);
+    }
   });
   
   console.log(`Created ChatLLM with chat ID: ${llm.chat.id}`);
@@ -158,6 +165,18 @@ async function testChatLLM(models) {
     });
     console.log(`Response: ${result.content}`);
     console.log(`Usage: ${JSON.stringify(result.usage)}`);
+    
+    // Verify title was generated and hook was called
+    if (!titleGenerated) {
+      throw new Error('onTitle hook was not called');
+    }
+    if (!generatedTitle || generatedTitle.trim() === '') {
+      throw new Error('Title was not generated or is empty');
+    }
+    if (!llm.chat.title || llm.chat.title !== generatedTitle) {
+      throw new Error(`Title mismatch: chat.title=${llm.chat.title}, hook title=${generatedTitle}`);
+    }
+    console.log(`  ✓ Title generated and onTitle hook called: "${llm.chat.title}"`);
   } catch (err) {
     console.error('Error in completion:', err.message);
     throw err;

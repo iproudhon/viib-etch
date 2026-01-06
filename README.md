@@ -141,7 +141,8 @@ const llm = ChatLLM.newChatSession('gpt-5.1-coder', false, null, {
   onResponseDone: (content, elapsed) => console.log(`\nResponse done (${elapsed}ms)`),
   onToolCallStart: (toolCall, args) => console.log(`Tool: ${toolCall.function.name}`),
   onToolCallData: (toolCall, data) => console.log('Tool data:', data),
-  onToolCallEnd: (toolCall, result, elapsed) => console.log(`Tool done (${elapsed}ms)`)
+  onToolCallEnd: (toolCall, result, elapsed) => console.log(`Tool done (${elapsed}ms)`),
+  onTitle: (title) => console.log(`Chat title: ${title}`)
 });
 
 // Send messages
@@ -333,6 +334,9 @@ const llm2 = new ChatLLM(null, loaded);
 const hooks = {
   onRequestStart: async () => {
     console.log('🚀 Starting request...');
+  },
+  onTitle: async (title) => {
+    console.log(`📝 Chat titled: ${title}`);
   },
   onResponseData: async (chunk) => {
     process.stdout.write(chunk);

@@ -308,7 +308,8 @@ class ChatLLM {
       onResponseDone: hooks.onResponseDone || null,
       onToolCallStart: hooks.onToolCallStart || null,
       onToolCallData: hooks.onToolCallData || null,
-      onToolCallEnd: hooks.onToolCallEnd || null
+      onToolCallEnd: hooks.onToolCallEnd || null,
+      onTitle: hooks.onTitle || null
     };
   }
   
@@ -673,6 +674,77 @@ class ChatLLM {
     }
   }
   
+  async _generateTitle() {
+    // Only generate title if not already set and we have messages
+    if (this.chat.title && this.chat.title.trim() !== '') {
+      return;
+    }
+    
+    const userMessages = this.chat.messages.filter(msg => msg.role === 'user');
+    const assistantMessages = this.chat.messages.filter(msg => msg.role === 'assistant');
+    
+    // Only generate title if we have at least one user message and one assistant response
+    if (userMessages.length === 0 || assistantMessages.length === 0) {
+      return;
+    }
+    
+    try {
+      const model = this._ensureModelResolved();
+      const client = this.getClient();
+      
+      // Create a title generation request with the first exchange
+      const titleMessages = [
+        {
+          role: 'system',
+          content: 'Generate a concise, descriptive title (maximum 10 words) for this conversation based on the user\'s request and your response. Return only the title, nothing else.'
+        },
+        {
+          role: 'user',
+          content: userMessages[0].content || ''
+        }
+      ];
+      
+      // Include first assistant response if available
+      if (assistantMessages[0] && assistantMessages[0].content) {
+        titleMessages.push({
+          role: 'assistant',
+          content: String(assistantMessages[0].content).substring(0, 500) // Limit context
+        });
+      }
+      
+      // Use max_completion_tokens for newer models (GPT-5+), max_tokens for older models
+      const modelName = model.model.toLowerCase();
+      const useMaxCompletionTokens = modelName.startsWith('gpt-5') || modelName.startsWith('gpt-4o') || modelName.startsWith('gpt-4-turbo');
+      
+      const titleParams = {
+        model: model.model,
+        messages: titleMessages,
+      };
+      
+      if (useMaxCompletionTokens) {
+        titleParams.max_completion_tokens = 50;
+      } else {
+        titleParams.max_tokens = 50;
+      }
+      
+      const response = await client.chat.completions.create(titleParams);
+      
+      const title = response.choices[0]?.message?.content?.trim();
+      if (title) {
+        // Clean up the title - remove quotes, extra whitespace, etc.
+        const cleanTitle = title.replace(/^["']|["']$/g, '').trim();
+        if (cleanTitle && cleanTitle.length > 0) {
+          this.chat.title = cleanTitle.substring(0, 200); // Cap at 200 chars
+          this.chat.save();
+          // Call onTitle hook
+          await this.callHook('onTitle', this.chat.title);
+        }
+      }
+    } catch (err) {
+      // Silently fail - title generation is best-effort
+    }
+  }
+
   async complete(options = {}) {
     const {
       tools = this.tools,
@@ -827,6 +899,11 @@ class ChatLLM {
       
       // Add message to chat
       this.chat.addMessage(assistantMessage);
+      
+      // Generate title if not already set
+      if (assistantMessage.content) {
+        await this._generateTitle();
+      }
       
       lastResult = {
         message,
@@ -1052,6 +1129,11 @@ class ChatLLM {
       // Add message to chat (this will save the response_id with the message)
       this.chat.addMessage(assistantMessage);
       
+      // Generate title if not already set
+      if (assistantMessage.content) {
+        await this._generateTitle();
+      }
+      
       lastResult = {
         message,
         content: message.content,
@@ -1235,6 +1317,11 @@ class ChatLLM {
       
       // Add message to chat
       this.chat.addMessage(assistantMessage);
+      
+      // Generate title if not already set
+      if (assistantMessage.content) {
+        await this._generateTitle();
+      }
       
       lastResult = assistantMessage;
       
@@ -1634,6 +1721,11 @@ class ChatLLM {
       // Add message to chat (this will save the response_id with the message)
       this.chat.addMessage(assistantMessage);
       
+      // Generate title if not already set
+      if (assistantMessage.content) {
+        await this._generateTitle();
+      }
+      
       lastResult = assistantMessage;
       
       // Automatically execute tool calls if present
@@ -1835,6 +1927,9 @@ function consoleLogHooks(opts = {}) {
         console.log(`${p}[tool:end] ${toolCall?.function?.name || '(unknown)'}${timing}`);
       }
     } : null,
+    onTitle: async (title) => {
+      console.log(`${p}[title] ${title}`);
+    },
   };
 }
 
