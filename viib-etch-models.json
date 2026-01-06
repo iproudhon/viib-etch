@@ -35,6 +35,15 @@
         "reasoning_effort": "high"
     },
     {
+        "name": "gpt-5.2-coder",
+        "model": "gpt-5.2",
+        "baseUrl": "https://api.openai.com/v1",
+        "api_key_file": "/data/sjung/src/viib-etch/.openai-api-key",
+        "system_prompt_file": "/data/sjung/src/viib-etch/viib-etch.system.coder.prompt",
+        "tools": ["run_terminal_cmd", "rg", "delete_file", "read_lints", "todo_write", "apply_patch", "read_file", "list_dir", "glob_file_search", "web_search_preview"],
+        "reasoning_effort": "high"
+    },
+    {
         "name": "gpt-5.1-coder",
         "model": "gpt-5.1",
         "baseUrl": "https://api.openai.com/v1",

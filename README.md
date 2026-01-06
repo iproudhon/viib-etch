@@ -76,11 +76,25 @@ API keys can be provided via:
 2. **Environment variable**: `OPENAI_API_KEY` for OpenAI models
 3. **Direct config**: `api_key` in model config (not recommended)
 
+**File path resolution for `api_key_file`:**
+- **Absolute paths**: Used as-is
+- **Relative paths**: Resolved in order:
+  1. Current working directory
+  2. Directory containing the models file (`viib-etch-models.json`)
+  3. Module directory (`__dirname`)
+
 ### System Prompts
 
 System prompts can be:
 - **File-based**: Set `system_prompt_file` in model config (reloaded on each request)
 - **Inline**: Set `system_prompt` in model config
+
+**File path resolution for `system_prompt_file`:**
+- **Absolute paths**: Used as-is
+- **Relative paths**: Resolved in order:
+  1. Current working directory
+  2. Directory containing the models file (`viib-etch-models.json`)
+  3. Module directory (`__dirname`)
 
 ## Core API
 
@@ -242,12 +256,19 @@ The library handles:
 
 ```javascript
 const {
+  ChatModel,
+  ChatSession,
+  ChatLLM,
+  setModelsFileName,
+  getModelsFileName,
+  setChatsDir,
+  getChatsDir,
+  consoleLogHooks,
   loadModels,
   loadChat,
   listChatSessions,
   createChat,
-  openChat,
-  consoleLogHooks
+  openChat
 } = require('./viib-etch');
 
 // Load models
@@ -261,6 +282,14 @@ const sessions = listChatSessions();
 sessions.forEach(s => {
   console.log(`${s.id}: ${s.title} (${s.message_count} messages)`);
 });
+
+// Configure models file location
+setModelsFileName('/path/to/custom-models.json');
+const currentModelsFile = getModelsFileName();
+
+// Configure chats directory location
+setChatsDir('/path/to/custom-chats');
+const currentChatsDir = getChatsDir();
 
 // Create chat with string hooks (convenient shortcuts)
 const llm1 = createChat('gpt-5.1-coder', false, null, 'console');  // Full console logging

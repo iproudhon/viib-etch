@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { OpenAI } = require('openai');
 
-let baseDir = __dirname;
+let modelsFileName = path.join(__dirname, 'viib-etch-models.json')
 let chatsDir = path.join(__dirname, 'chats')
 
 function ensureDirExists(dirPath) {
@@ -18,15 +18,15 @@ function ensureDirExists(dirPath) {
   }
 }
 
-function setBaseDir(dirPath) {
-  if (typeof dirPath !== 'string' || dirPath.trim() === '') {
-    throw new Error('baseDir must be a non-empty string');
+function setModelsFileName(fileName) {
+  if (typeof fileName !== 'string' || fileName.trim() === '') {
+    throw new Error('modelsFileName must be a non-empty string');
   }
-  baseDir = dirPath;
+  modelsFileName = fileName;
 }
 
-function getBaseDir() {
-  return baseDir;
+function getModelsFileName() {
+  return modelsFileName;
 }
 
 function setChatsDir(dirPath) {
@@ -38,6 +38,27 @@ function setChatsDir(dirPath) {
 
 function getChatsDir() {
   return chatsDir;
+}
+
+function resolveConfigFile(filePath) {
+  if (!filePath) return null;
+  if (path.isAbsolute(filePath)) {
+    return filePath;
+  }
+  // Try relative paths in order: current directory, getModelsFileName directory, __dirname
+  const searchDirs = [
+    process.cwd(),
+    path.dirname(getModelsFileName()),
+    __dirname
+  ];
+  for (const dir of searchDirs) {
+    const candidatePath = path.join(dir, filePath);
+    if (fs.existsSync(candidatePath)) {
+      return candidatePath;
+    }
+  }
+  // If not found, return path relative to current directory (will error on read if doesn't exist)
+  return path.join(process.cwd(), filePath);
 }
 
 class ChatModel {
@@ -54,7 +75,7 @@ class ChatModel {
     // Load API key - prioritize file if specified, then config, then env var
     if (this.api_key_file) {
       try {
-        const keyPath = path.resolve(this.api_key_file);
+        const keyPath = resolveConfigFile(this.api_key_file);
         this.api_key = fs.readFileSync(keyPath, 'utf8').trim();
       } catch (err) {
         throw new Error(`Failed to load API key from ${this.api_key_file}: ${err.message}`);
@@ -71,14 +92,14 @@ class ChatModel {
   readSystemPromptFileFresh() {
     if (!this.system_prompt_file) return null;
     try {
-      const promptPath = path.resolve(this.system_prompt_file);
+      const promptPath = resolveConfigFile(this.system_prompt_file);
       return fs.readFileSync(promptPath, 'utf8');
     } catch (err) {
       throw new Error(`Failed to load system prompt from ${this.system_prompt_file}: ${err.message}`);
     }
   }
   
-  static loadModels(modelsFile = path.join(getBaseDir(), 'viib-etch-models.json')) {
+  static loadModels(modelsFile = getModelsFileName()) {
     try {
       const filePath = path.resolve(modelsFile);
       const content = fs.readFileSync(filePath, 'utf8');
@@ -330,7 +351,7 @@ class ChatLLM {
         const resolved = models.find(m => m.name === model_name);
         if (resolved && Array.isArray(resolved.tools) && resolved.tools.length > 0) {
           const { getToolDefinitions } = require(path.join(__dirname, 'viib-etch-tools'))
-          const toolsPath = path.join(getBaseDir(), 'viib-etch-tools.json')
+          const toolsPath = path.join(__dirname, 'viib-etch-tools.json')
           tools = getToolDefinitions(toolsPath, resolved.tools)
         }
       } catch (e) {
@@ -1999,7 +2020,7 @@ function openChat(chatId, tools = null, hooks = {}) {
       const resolved = models.find(m => m.name === modelName);
       if (resolved && Array.isArray(resolved.tools) && resolved.tools.length > 0) {
         const { getToolDefinitions } = require(path.join(__dirname, 'viib-etch-tools'));
-        const toolsPath = path.join(getBaseDir(), 'viib-etch-tools.json');
+        const toolsPath = path.join(__dirname, 'viib-etch-tools.json');
         tools = getToolDefinitions(toolsPath, resolved.tools);
       }
     } catch (e) {
@@ -2015,8 +2036,8 @@ module.exports = {
   ChatModel,
   ChatSession,
   ChatLLM,
-  setBaseDir,
-  getBaseDir,
+  setModelsFileName,
+  getModelsFileName,
   setChatsDir,
   getChatsDir,
   consoleLogHooks,
