@@ -44,12 +44,9 @@ const { createChat } = require('./viib-etch');
 // Create a new chat session with brief logging (string shortcut)
 const coder = createChat('gpt-5.1-coder', true, null, 'brief')
 
-// move to the coding project directory if different
-process.chdir('/data/project-a')
-
-// Let it implement UI.
-await coder.send('Implement https server and chat UI, composed with messages at top and user text field at bottom. Make UI work with backend server. Make reasonable assumptions', { stream: true});
-
+// Ask it to implement 'web-search' tool, which is not implemented at the time of writing this.
+// This request is fully functional, i.e. it does what normal coding agent, like Cursor IDE, does.
+response = await coder.send("Implement web-search tool using brave web search. Add test cases, run them, and fix issues if any.", { stream: true})
 ```
 
 
