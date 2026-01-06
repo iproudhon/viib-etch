@@ -7,6 +7,7 @@ A powerful Node.js library for building coding agents with LLM integration. Desi
 - 🤖 **Multi-Model Support**: Works with OpenAI, OpenRouter, and other compatible APIs
 - 💬 **Chat Session Management**: Persistent chat sessions with automatic saving/loading
 - 🔧 **Tool Calling**: Built-in support for function calling with automatic tool execution
+- 🧾 **Tool Diffs**: Stores diffs/patches from file-modifying tools in `ChatSession.data`
 - 📡 **Streaming**: Real-time streaming of responses and reasoning
 - 🎣 **Hooks System**: Comprehensive event hooks for monitoring requests, responses, and tool calls
 - 📝 **System Prompts**: Dynamic system prompt loading from files
@@ -119,6 +120,16 @@ session.save();
 const loaded = ChatSession.load(session.id);
 ```
 
+#### Tool diffs in `ChatSession.data`
+
+File-modifying tools may store diffs and patch commands in the session’s data for later inspection:
+
+- `session.data.diffs[toolCallId] = { diff, patchCommand, toolName }`
+
+Notes:
+- These fields are persisted if the session is persistent.
+- `_diff` / `_patchCommand` are stripped from the tool message content (they live in `session.data` instead).
+
 ### ChatLLM
 
 Main interface for LLM interactions:
@@ -164,6 +175,8 @@ viib-etch includes a comprehensive set of tools for coding agents:
 - **`delete_file`**: Delete files with graceful error handling
 - **`list_dir`**: List directory contents with glob filtering
 - **`glob_file_search`**: Search for files matching patterns, sorted by modification time
+
+For `apply_patch` and `delete_file`, the library records a unified diff (and for `apply_patch`, the patch text) into `ChatSession.data.diffs` keyed by tool call id.
 
 ### Code Operations
 - **`rg`**: Fast text search using ripgrep (respects .gitignore)
