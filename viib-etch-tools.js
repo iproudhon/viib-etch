@@ -324,15 +324,36 @@ const toolHandlers = {
     if (typeof command !== 'string') {
       throw new Error('run_terminal_cmd: "command" is required')
     }
+    
+    // Check for cancellation before starting
+    if (context?._isCancelled && context._isCancelled()) {
+      throw new Error('Operation cancelled');
+    }
+    
     const onCommandOut = context?.onCommandOut || null
+    const activeProcesses = context?._activeProcesses || null;
     const shell = process.env.SHELL || '/bin/bash';
     const child = spawn(shell, ['-lc', command], {
       cwd: process.cwd(),
       stdio: is_background ? 'ignore' : ['ignore', 'pipe', 'pipe'],
     });
   
+    // Track process for cancellation
+    const processKey = `run_terminal_cmd_${child.pid}_${Date.now()}`;
+    if (activeProcesses) {
+      activeProcesses.set(processKey, child);
+    }
+  
+    // Clean up on process exit
+    const cleanup = () => {
+      if (activeProcesses) {
+        activeProcesses.delete(processKey);
+      }
+    };
+  
     if (is_background) {
       child.unref();
+      child.on('close', cleanup);
       return {
         command,
         pid: child.pid,
@@ -347,7 +368,31 @@ const toolHandlers = {
     let stderr = '';
   
     return await new Promise((resolve, reject) => {
+      let isResolved = false;
+      
+      // Check for cancellation periodically
+      const checkCancellation = () => {
+        if (context?._isCancelled && context._isCancelled()) {
+          if (!isResolved) {
+            isResolved = true;
+            try {
+              if (!child.killed) {
+                child.kill('SIGTERM');
+              }
+            } catch (err) {
+              // Ignore errors when killing
+            }
+            cleanup();
+            clearInterval(cancellationInterval);
+            reject(new Error('Operation cancelled'));
+            return true;
+          }
+        }
+        return false;
+      };
+      
       child.stdout.on('data', (chunk) => {
+        if (isResolved) return;
         const text = chunk.toString()
         stdout += text
         if (onCommandOut) {
@@ -358,6 +403,7 @@ const toolHandlers = {
         }
       })
       child.stderr.on('data', (chunk) => {
+        if (isResolved) return;
         const text = chunk.toString()
         stderr += text
         if (onCommandOut) {
@@ -367,19 +413,36 @@ const toolHandlers = {
           })
         }
       })
-      child.on('error', reject);
+      child.on('error', (err) => {
+        if (!isResolved) {
+          isResolved = true;
+          cleanup();
+          clearInterval(cancellationInterval);
+          reject(err);
+        }
+      });
       child.on('close', (code) => {
-        resolve({
-          command,
-          pid: child.pid,
-          is_background: false,
-          explanation,
-          required_permissions: required_permissions,
-          exitCode: code,
-          stdout,
-          stderr,
-        })
+        if (!isResolved) {
+          isResolved = true;
+          cleanup();
+          clearInterval(cancellationInterval);
+          resolve({
+            command,
+            pid: child.pid,
+            is_background: false,
+            explanation,
+            required_permissions: required_permissions,
+            exitCode: code,
+            stdout,
+            stderr,
+          })
+        }
       })
+      
+      // Check cancellation periodically (every 100ms)
+      const cancellationInterval = setInterval(() => {
+        checkCancellation();
+      }, 100);
     })      
   },
 

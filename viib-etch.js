@@ -332,6 +332,8 @@ class ChatLLM {
       onToolCallEnd: hooks.onToolCallEnd || null,
       onTitle: hooks.onTitle || null
     };
+    this._abortController = null;
+    this._activeProcesses = new Map();
   }
   
   static newChatSession(model_name, persistent = false, tools = null, hooks = {}) {
@@ -695,6 +697,27 @@ class ChatLLM {
     }
   }
   
+  cancel() {
+    if (this._abortController) {
+      this._abortController.abort();
+    }
+    // Kill all active processes
+    for (const [key, child] of this._activeProcesses) {
+      try {
+        if (child && !child.killed) {
+          child.kill('SIGTERM');
+        }
+      } catch (err) {
+        // Ignore errors when killing processes
+      }
+      this._activeProcesses.delete(key);
+    }
+  }
+  
+  _isCancelled() {
+    return this._abortController && this._abortController.signal.aborted;
+  }
+  
   async _generateTitle() {
     // Only generate title if not already set and we have messages
     if (this.chat.title && this.chat.title.trim() !== '') {
@@ -816,14 +839,34 @@ class ChatLLM {
     // IMPORTANT: request options must NOT be included in the API body.
     let requestOptions = undefined;
     let timeoutId = null;
+    let timeoutController = null;
+    
+    // Create abort controller for cancellation
+    this._abortController = new AbortController();
+    
+    // Combine timeout and cancellation signals
     if (timeout_ms !== null && timeout_ms !== undefined) {
       const ms = Number(timeout_ms);
       if (!Number.isFinite(ms) || ms <= 0) {
         throw new Error('timeout_ms must be a positive number (milliseconds)');
       }
-      const controller = new AbortController();
-      timeoutId = setTimeout(() => controller.abort(), ms);
-      requestOptions = { signal: controller.signal };
+      timeoutController = new AbortController();
+      timeoutId = setTimeout(() => timeoutController.abort(), ms);
+      
+      // Combine signals: create a signal that aborts when either does
+      const combinedController = new AbortController();
+      const abortOnSignal = (signal) => {
+        if (signal.aborted) {
+          combinedController.abort();
+        } else {
+          signal.addEventListener('abort', () => combinedController.abort(), { once: true });
+        }
+      };
+      abortOnSignal(this._abortController.signal);
+      abortOnSignal(timeoutController.signal);
+      requestOptions = { signal: combinedController.signal };
+    } else {
+      requestOptions = { signal: this._abortController.signal };
     }
 
     try {
@@ -839,6 +882,9 @@ class ChatLLM {
       return await p;
     } finally {
       if (timeoutId) clearTimeout(timeoutId);
+      this._abortController = null;
+      // Clear processes map but don't kill them (they may still be running)
+      this._activeProcesses.clear();
     }
   }
   
@@ -854,6 +900,11 @@ class ChatLLM {
     let accumulatedUsage = null;
     
     while (iteration < max_iterations) {
+      // Check for cancellation
+      if (this._isCancelled()) {
+        throw new Error('Operation cancelled');
+      }
+      
       // Build request parameters for this iteration
       const requestParams = {
         ...params,
@@ -935,6 +986,11 @@ class ChatLLM {
         finish_reason: choice.finish_reason
       };
       
+      // Check for cancellation before tool execution
+      if (this._isCancelled()) {
+        throw new Error('Operation cancelled');
+      }
+      
       // Automatically execute tool calls if present
       if (message.tool_calls && message.tool_calls.length > 0) {
         await this._executeToolCallsInternal({
@@ -964,6 +1020,11 @@ class ChatLLM {
     let accumulatedUsage = null;
     
     while (iteration < max_iterations) {
+      // Check for cancellation
+      if (this._isCancelled()) {
+        throw new Error('Operation cancelled');
+      }
+      
       // Build base request parameters
       const requestParams = { ...params };
 
@@ -1164,6 +1225,11 @@ class ChatLLM {
         finish_reason: choice.finish_reason ?? null
       };
       
+      // Check for cancellation before tool execution
+      if (this._isCancelled()) {
+        throw new Error('Operation cancelled');
+      }
+      
       // Automatically execute tool calls if present
       if (message.tool_calls && message.tool_calls.length > 0) {
         await this._executeToolCallsInternal({
@@ -1192,6 +1258,11 @@ class ChatLLM {
     let lastResult = null;
     
     while (iteration < max_iterations) {
+      // Check for cancellation
+      if (this._isCancelled()) {
+        throw new Error('Operation cancelled');
+      }
+      
       // Build request parameters for this iteration
       const requestParams = {
         ...params,
@@ -1221,6 +1292,11 @@ class ChatLLM {
       let firstEventAfterRequestDone = true;
       
       for await (const chunk of stream) {
+        // Check for cancellation during streaming
+        if (this._isCancelled()) {
+          throw new Error('Operation cancelled');
+        }
+        
         const choice = chunk.choices[0];
         if (!choice) continue;
         
@@ -1346,6 +1422,11 @@ class ChatLLM {
       
       lastResult = assistantMessage;
       
+      // Check for cancellation before tool execution
+      if (this._isCancelled()) {
+        throw new Error('Operation cancelled');
+      }
+      
       // Automatically execute tool calls if present
       if (toolCallsArray.length > 0) {
         // Convert tool_call format to tool_calls format for execution
@@ -1375,6 +1456,11 @@ class ChatLLM {
     let lastResult = null;
     
     while (iteration < max_iterations) {
+      // Check for cancellation
+      if (this._isCancelled()) {
+        throw new Error('Operation cancelled');
+      }
+      
       // Build base request parameters
       const requestParams = { ...params };
       
@@ -1619,6 +1705,11 @@ class ChatLLM {
       let firstEventAfterRequestDone = true;
       
       for await (const chunk of stream) {
+        // Check for cancellation during streaming
+        if (this._isCancelled()) {
+          throw new Error('Operation cancelled');
+        }
+        
         const choice = chunk.choices[0];
         if (!choice) continue;
         
@@ -1749,6 +1840,11 @@ class ChatLLM {
       
       lastResult = assistantMessage;
       
+      // Check for cancellation before tool execution
+      if (this._isCancelled()) {
+        throw new Error('Operation cancelled');
+      }
+      
       // Automatically execute tool calls if present
       if (toolCallsArray.length > 0) {
         // Convert tool_call format to tool_calls format for execution
@@ -1799,6 +1895,11 @@ class ChatLLM {
     const toolResults = [];
     
     for (const toolCall of result.tool_calls) {
+      // Check for cancellation before each tool call
+      if (this._isCancelled()) {
+        throw new Error('Operation cancelled');
+      }
+      
       const toolCallStartTime = Date.now();
       try {
         const args = JSON.parse(toolCall.function.arguments);
@@ -1807,7 +1908,9 @@ class ChatLLM {
           session: this.chat,
           onCommandOut: async (data) => {
             await this.callHook('onToolCallData', toolCall, data);
-          }
+          },
+          _activeProcesses: this._activeProcesses,
+          _isCancelled: () => this._isCancelled()
         };
         
         const toolResult = await executeTool(toolCall.function.name, args, context);
