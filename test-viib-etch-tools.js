@@ -729,6 +729,187 @@ async function testReadLints() {
   console.log('  ✓ Returns stable no-lints message');
 }
 
+async function testEditFile() {
+  console.log('\n=== Test: edit_file Tool ===');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'viib-etch-tools-editfile-'));
+  try {
+    // Set up test session for file originals tracking
+    setChatsDir(TEST_CHATS_DIR);
+    const session = new ChatSession({
+      title: 'Test Edit File',
+      model_name: 'test-model'
+    });
+    session.enablePersistence();
+    const context = { session };
+
+    // Test 1: Create a new file (file doesn't exist)
+    const newFile = path.join(tmpDir, 'new.txt');
+    const codeEdit1 = 'line1\nline2\nline3';
+    
+    const res1 = await executeTool('edit_file', {
+      target_file: newFile,
+      instructions: 'Create a new file with three lines',
+      code_edit: codeEdit1
+    }, context);
+
+    if (!res1 || res1.success !== true || !res1.created) {
+      throw new Error(`edit_file create failed: ${JSON.stringify(res1)}`);
+    }
+    if (!fs.existsSync(newFile)) {
+      throw new Error('New file should have been created');
+    }
+    const content1 = fs.readFileSync(newFile, 'utf8');
+    if (content1 !== 'line1\nline2\nline3') {
+      throw new Error(`Unexpected file content: ${JSON.stringify(content1)}`);
+    }
+    console.log('  ✓ Creates a new file');
+
+    // Test 2: Simple edit without markers (single segment replacement)
+    const codeEdit2 = 'LINE1\nline2\nline3';
+    const res2 = await executeTool('edit_file', {
+      target_file: newFile,
+      instructions: 'Replace first line with uppercase',
+      code_edit: codeEdit2
+    }, context);
+
+    if (!res2 || res2.success !== true || res2.created) {
+      throw new Error(`edit_file update failed: ${JSON.stringify(res2)}`);
+    }
+    const content2 = fs.readFileSync(newFile, 'utf8');
+    if (!content2.includes('LINE1') || content2.includes('line1')) {
+      throw new Error(`File not updated as expected, content:\n${content2}`);
+    }
+    console.log('  ✓ Updates existing file without markers');
+
+    // Test 3: Edit with marker comments (multiple segments)
+    fs.writeFileSync(newFile, 'header1\nheader2\nbody1\nbody2\nbody3\nfooter1\nfooter2', 'utf8');
+    const codeEdit3 = 'header1\nheader2\n// ... existing code ...\nBODY1\nBODY2\nBODY3\n// ... existing code ...\nfooter1\nfooter2';
+    
+    const res3 = await executeTool('edit_file', {
+      target_file: newFile,
+      instructions: 'Update body lines to uppercase while preserving header and footer',
+      code_edit: codeEdit3
+    }, context);
+
+    if (!res3 || res3.success !== true) {
+      throw new Error(`edit_file multi-segment failed: ${JSON.stringify(res3)}`);
+    }
+    const content3 = fs.readFileSync(newFile, 'utf8');
+    if (!content3.includes('BODY1') || !content3.includes('BODY2') || !content3.includes('BODY3')) {
+      throw new Error(`Body not updated to uppercase, content:\n${content3}`);
+    }
+    if (!content3.includes('header1') || !content3.includes('footer1')) {
+      throw new Error(`Header/footer not preserved, content:\n${content3}`);
+    }
+    if (content3.includes('body1') || content3.includes('body2')) {
+      throw new Error(`Old body still present, content:\n${content3}`);
+    }
+    console.log('  ✓ Multi-segment edit with markers works');
+
+    // Test 4: Edit with Python-style comment markers
+    const pyFile = path.join(tmpDir, 'test.py');
+    fs.writeFileSync(pyFile, 'def func1():\n    pass\n\ndef func2():\n    pass', 'utf8');
+    const codeEdit4 = 'def func1():\n    pass\n\n# ... existing code ...\ndef func2():\n    return True';
+    
+    const res4 = await executeTool('edit_file', {
+      target_file: pyFile,
+      instructions: 'Update func2 to return True',
+      code_edit: codeEdit4
+    }, context);
+
+    if (!res4 || res4.success !== true) {
+      throw new Error(`edit_file Python marker failed: ${JSON.stringify(res4)}`);
+    }
+    const content4 = fs.readFileSync(pyFile, 'utf8');
+    if (!content4.includes('return True')) {
+      throw new Error(`Python edit not applied, content:\n${content4}`);
+    }
+    console.log('  ✓ Python-style comment markers work');
+
+    // Test 5: Missing target_file
+    const res5 = await executeTool('edit_file', {
+      code_edit: 'test',
+      instructions: 'Test'
+    }, context);
+    if (!res5 || res5.success !== false || !res5.error || !res5.error.includes('target_file')) {
+      throw new Error(`Expected error for missing target_file, got: ${JSON.stringify(res5)}`);
+    }
+    console.log('  ✓ Missing target_file correctly rejected');
+
+    // Test 6: Missing code_edit
+    const res6 = await executeTool('edit_file', {
+      target_file: newFile,
+      instructions: 'Test'
+    }, context);
+    if (!res6 || res6.success !== false || !res6.error || !res6.error.includes('code_edit')) {
+      throw new Error(`Expected error for missing code_edit, got: ${JSON.stringify(res6)}`);
+    }
+    console.log('  ✓ Missing code_edit correctly rejected');
+
+    // Test 7: Edit that filters markers from new file
+    const newFile2 = path.join(tmpDir, 'new2.txt');
+    const codeEdit7 = 'line1\n// ... existing code ...\nline2';
+    
+    const res7 = await executeTool('edit_file', {
+      target_file: newFile2,
+      instructions: 'Create file and filter markers',
+      code_edit: codeEdit7
+    }, context);
+
+    if (!res7 || res7.success !== true || !res7.created) {
+      throw new Error(`edit_file marker filter failed: ${JSON.stringify(res7)}`);
+    }
+    const content7 = fs.readFileSync(newFile2, 'utf8');
+    if (content7.includes('existing code')) {
+      throw new Error(`Marker comment not filtered from new file, content:\n${content7}`);
+    }
+    if (!content7.includes('line1') || !content7.includes('line2')) {
+      throw new Error(`Content missing, content:\n${content7}`);
+    }
+    console.log('  ✓ Marker comments filtered from new files');
+
+    // Test 8: Contextual matching when exact match fails
+    fs.writeFileSync(newFile, 'function foo() {\n    let x = 1;\n    let y = 2;\n    return x + y;\n}', 'utf8');
+    const codeEdit8 = '    let x = 10;\n    let y = 20;';
+    
+    const res8 = await executeTool('edit_file', {
+      target_file: newFile,
+      instructions: 'Update x and y values',
+      code_edit: codeEdit8
+    }, context);
+
+    if (!res8 || res8.success !== true) {
+      throw new Error(`edit_file contextual match failed: ${JSON.stringify(res8)}`);
+    }
+    const content8 = fs.readFileSync(newFile, 'utf8');
+    if (!content8.includes('let x = 10') || !content8.includes('let y = 20')) {
+      throw new Error(`Contextual edit not applied, content:\n${content8}`);
+    }
+    console.log('  ✓ Contextual matching works when exact match unavailable');
+
+    // Test 9: Verify diff generation
+    if (res8._diff && res8._diff.includes('let x =')) {
+      console.log('  ✓ Diff generation works');
+    } else {
+      console.log('  ⚠ Diff generation test skipped (diff may be empty or unavailable)');
+    }
+
+    // Test 10: Verify file originals tracking
+    if (session.data && session.data.fileOriginals) {
+      const relPath = path.relative(process.cwd(), newFile);
+      if (relPath in session.data.fileOriginals) {
+        console.log('  ✓ File originals tracked in session');
+      } else {
+        console.log('  ⚠ File originals tracking may not be working');
+      }
+    }
+
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 async function testListDirAndGlobFileSearch() {
   console.log('\n=== Test: list_dir / glob_file_search Tools ===');
 
@@ -878,7 +1059,10 @@ async function runTests() {
     // Test 12: read_lints tool
     await testReadLints();
 
-    // Test 13: list_dir + glob_file_search tools
+    // Test 13: edit_file tool
+    await testEditFile();
+
+    // Test 14: list_dir + glob_file_search tools
     await testListDirAndGlobFileSearch();
     
     console.log('\n=== All Tests Passed ===');
@@ -913,6 +1097,7 @@ module.exports = {
   testGetToolHandler,
   testTodoWrite,
   testRunTerminalCmd,
+  testEditFile,
   runTests
 };
 

@@ -129,26 +129,343 @@ function splitLinesPreserveEmpty(text) {
   return String(text).split('\n').map(l => (l.endsWith('\r') ? l.slice(0, -1) : l));
 }
 
-async function readJsonSafe(filePath, fallback) {
-  try {
-    const txt = await fsp.readFile(filePath, 'utf-8');
-    return JSON.parse(txt);
-  } catch {
-    return fallback;
+// Helper functions for edit_file
+function splitByMarkers(codeEdit) {
+  // Split code edit by markers like "// ... existing code ..."
+  // Supports multiple comment styles: //, #, <!--, etc.
+  const markerPattern = /^(\s*)(\/\/|#|<!--)\s*\.\.\.\s*existing\s+code\s*\.\.\.(\s*-->)?(\s*)$/gim;
+  const segments = [];
+  let lastIndex = 0;
+  let match;
+
+  while ((match = markerPattern.exec(codeEdit)) !== null) {
+    if (match.index > lastIndex) {
+      // Extract segment and trim trailing newlines/whitespace
+      let segment = codeEdit.slice(lastIndex, match.index).trimEnd();
+      segments.push(segment);
+    }
+    // Skip the marker line itself (including its newline if any)
+    lastIndex = markerPattern.lastIndex;
+    // Skip any trailing newline after the marker
+    while (lastIndex < codeEdit.length && (codeEdit[lastIndex] === '\n' || codeEdit[lastIndex] === '\r')) {
+      lastIndex++;
+    }
   }
+
+  if (lastIndex < codeEdit.length) {
+    // Extract remaining segment and trim trailing whitespace
+    let segment = codeEdit.slice(lastIndex).trimEnd();
+    if (segment.length > 0) {
+      segments.push(segment);
+    }
+  }
+
+  // If no markers found, return the whole edit as a single segment
+  if (segments.length === 0) {
+    segments.push(codeEdit.trimEnd());
+  }
+
+  return segments.filter(s => s.length > 0);
 }
 
-async function writeJsonSafe(filePath, value) {
-  await fsp.mkdir(path.dirname(filePath), { recursive: true });
-  await fsp.writeFile(filePath, JSON.stringify(value, null, 2), 'utf-8');
+function findRegionForSegment(segment, originalLines, searchStart) {
+  // Find where a segment should be applied using contextual matching
+  const segmentLines = segment.split('\n');
+  if (segmentLines.length === 0) return null;
+
+  // Try exact string match first
+  const segmentText = segment;
+  const originalText = originalLines.join('\n');
+  const exactIndex = originalText.indexOf(segmentText);
+  if (exactIndex !== -1) {
+    // Calculate line numbers from character index
+    const textBefore = originalText.slice(0, exactIndex);
+    const linesBefore = textBefore.split('\n').length - 1;
+    const segmentLineCount = segmentLines.length;
+    return {
+      start: linesBefore,
+      end: linesBefore + segmentLineCount - 1,
+      replacementLines: segmentLines,
+    };
+  }
+
+  // Try contextual matching: find unique context lines from the segment
+  // Use first K lines and last K lines as anchors (K=3)
+  const K = 3;
+  const headLines = segmentLines.slice(0, K).filter(l => l.trim().length > 0);
+  const tailLines = segmentLines.slice(-K).filter(l => l.trim().length > 0);
+
+  if (headLines.length === 0) return null;
+
+  // Find potential start positions matching head
+  let candidates = [];
+  for (let i = Math.max(searchStart, 0); i < originalLines.length; i++) {
+    const line = originalLines[i] || '';
+    // Try to match first head line (with some flexibility for whitespace)
+    if (headLines[0] && line.trim() === headLines[0].trim()) {
+      // Check if subsequent head lines match
+      let matches = true;
+      for (let j = 1; j < headLines.length && i + j < originalLines.length; j++) {
+        if (originalLines[i + j].trim() !== headLines[j].trim()) {
+          matches = false;
+          break;
+        }
+      }
+      if (matches) {
+        candidates.push(i);
+      }
+    }
+  }
+
+  // If no candidates from head match, try finding any matching line in segment
+  // and use it as an anchor point. Also try flexible matching for similar lines.
+  if (candidates.length === 0) {
+    // First, try exact line matching
+    for (let segIdx = 0; segIdx < segmentLines.length; segIdx++) {
+      const segLine = segmentLines[segIdx].trim();
+      if (segLine.length === 0) continue;
+      
+      // Look for this line in the original file
+      for (let origIdx = Math.max(searchStart, 0); origIdx < originalLines.length; origIdx++) {
+        if (originalLines[origIdx].trim() === segLine) {
+          // Found a match - use this as anchor
+          const proposedStart = origIdx - segIdx;
+          if (proposedStart >= 0 && proposedStart < originalLines.length) {
+            // Verify that surrounding lines make sense
+            let matchCount = 0;
+            const checkRange = Math.min(segmentLines.length, originalLines.length - proposedStart);
+            for (let k = 0; k < checkRange; k++) {
+              if (proposedStart + k < originalLines.length) {
+                const segTrim = segmentLines[k].trim();
+                const origTrim = originalLines[proposedStart + k].trim();
+                if (segTrim.length > 0 && segTrim === origTrim) {
+                  matchCount++;
+                }
+              }
+            }
+            if (matchCount > 0) {
+              candidates.push(proposedStart);
+              if (matchCount >= Math.min(2, segmentLines.length)) {
+                break;
+              }
+            }
+          }
+        }
+      }
+      if (candidates.length > 0) break;
+    }
+    
+    // If still no candidates, try flexible matching based on line structure
+    // Match lines that have similar prefixes (e.g., "let x = 10" matches "let x = 1")
+    if (candidates.length === 0) {
+      for (let segIdx = 0; segIdx < segmentLines.length; segIdx++) {
+        const segLine = segmentLines[segIdx].trim();
+        if (segLine.length === 0) continue;
+        
+        // Try to find a line that starts similarly (before the value/assignment)
+        // Look for patterns like "variable = value" and match on "variable ="
+        const segParts = segLine.split('=');
+        if (segParts.length >= 2) {
+          const segPrefix = segParts[0].trim();
+          
+          for (let origIdx = Math.max(searchStart, 0); origIdx < originalLines.length; origIdx++) {
+            const origLine = originalLines[origIdx].trim();
+            const origParts = origLine.split('=');
+            if (origParts.length >= 2) {
+              const origPrefix = origParts[0].trim();
+              // Match if the prefix (before =) is the same
+              if (segPrefix === origPrefix && segPrefix.length > 0) {
+                // Found a structural match - use this as anchor
+                const proposedStart = origIdx - segIdx;
+                if (proposedStart >= 0 && proposedStart < originalLines.length) {
+                  // Verify that at least some lines have matching structure
+                  let matchCount = 0;
+                  const checkRange = Math.min(segmentLines.length, originalLines.length - proposedStart);
+                  for (let k = 0; k < checkRange; k++) {
+                    if (proposedStart + k < originalLines.length) {
+                      const segTrim = segmentLines[k].trim();
+                      const origTrim = originalLines[proposedStart + k].trim();
+                      if (segTrim.length > 0 && origTrim.length > 0) {
+                        const segPre = segTrim.split('=')[0].trim();
+                        const origPre = origTrim.split('=')[0].trim();
+                        if (segPre === origPre && segPre.length > 0) {
+                          matchCount++;
+                        }
+                      }
+                    }
+                  }
+                  // Require at least 2 structural matches for this to be valid
+                  if (matchCount >= Math.min(2, segmentLines.length)) {
+                    candidates.push(proposedStart);
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        }
+        if (candidates.length > 0) break;
+      }
+    }
+  }
+
+  if (candidates.length === 0) return null;
+
+  // If multiple candidates, prefer one where tail also matches
+  let bestCandidate = candidates[0];
+  if (tailLines.length > 0 && candidates.length > 1) {
+    for (const cand of candidates) {
+      const expectedEnd = cand + segmentLines.length - 1;
+      if (expectedEnd < originalLines.length) {
+        const actualTailStart = Math.max(expectedEnd - tailLines.length + 1, cand);
+        let tailMatches = true;
+        for (let j = 0; j < tailLines.length && actualTailStart + j < originalLines.length; j++) {
+          if (originalLines[actualTailStart + j].trim() !== tailLines[j].trim()) {
+            tailMatches = false;
+            break;
+          }
+        }
+        if (tailMatches) {
+          bestCandidate = cand;
+          break;
+        }
+      }
+    }
+  }
+
+  return {
+    start: bestCandidate,
+    end: bestCandidate + segmentLines.length - 1,
+    replacementLines: segmentLines,
+  };
 }
 
-function memoryPath() {
-  // Allow tests or callers to override where memory is stored.
-  if (process.env.VIIB_ETCH_MEMORY_PATH) {
-    return resolveTargetPath(process.env.VIIB_ETCH_MEMORY_PATH);
+function applyEditToFile(codeEdit, originalContent) {
+  if (originalContent === null) {
+    // New file: filter out marker comments
+    const markerPattern = /\/\/\s*\.\.\.\s*existing\s+code\s*\.\.\./gi;
+    return codeEdit.split('\n')
+      .filter(line => !markerPattern.test(line.trim()))
+      .join('\n');
   }
-  return path.resolve(process.cwd(), 'viib.memory.json');
+
+  const originalLines = originalContent.split('\n');
+  const segments = splitByMarkers(codeEdit);
+
+  // If no markers, try exact match first, then contextual matching
+  if (segments.length === 1) {
+    const segment = segments[0];
+    const segmentLines = segment.split('\n');
+    
+    // Try exact match first (as string)
+    const exactMatch = originalContent.indexOf(segment);
+    if (exactMatch !== -1) {
+      // Exact match found - replace it (though content is same, so this is a no-op)
+      // But we still need to check if it's actually different
+      const before = originalContent.slice(0, exactMatch);
+      const after = originalContent.slice(exactMatch + segment.length);
+      const result = `${before}${segment}${after}`;
+      // If result is same as original, it's a no-op (will be caught later)
+      return result;
+    }
+    
+    // No exact match - try contextual matching using K-line anchors
+    const region = findRegionForSegment(segment, originalLines, 0);
+    if (region === null) {
+      throw new Error(`Failed to locate segment in target file:\n${segment.substring(0, 200)}`);
+    }
+    // Apply single patch
+    const newLines = [];
+    for (let i = 0; i < region.start; i += 1) {
+      newLines.push(originalLines[i]);
+    }
+    newLines.push(...region.replacementLines);
+    for (let i = region.end + 1; i < originalLines.length; i += 1) {
+      newLines.push(originalLines[i]);
+    }
+    return newLines.join('\n');
+  }
+
+  // Multi-segment edit: use contextual anchoring
+  // For multi-segment edits, segments are separated by markers and represent
+  // sequential regions to match/replace. We match each segment and replace the regions.
+  const patches = [];
+  let searchIndex = 0;
+
+  for (let segIdx = 0; segIdx < segments.length; segIdx++) {
+    const segment = segments[segIdx];
+    const segmentLines = segment.split('\n');
+    
+    // Try to find this segment in the original file
+    let region = findRegionForSegment(segment, originalLines, searchIndex);
+    
+    // If segment not found and it's a middle segment, try to infer position
+    // based on surrounding segments
+    if (region === null && segIdx > 0 && segIdx < segments.length - 1) {
+      // Middle segment - try to find position between previous and next segments
+      const prevRegion = patches[segIdx - 1];
+      if (prevRegion) {
+        // Start searching after the previous segment
+        searchIndex = prevRegion.end + 1;
+        
+        // If we have a next segment, try to find where it starts
+        let nextSegment = segments[segIdx + 1];
+        let nextRegion = findRegionForSegment(nextSegment, originalLines, searchIndex);
+        
+        if (nextRegion) {
+          // We found the next segment - the middle segment replaces everything between
+          // the end of previous and start of next
+          region = {
+            start: prevRegion.end + 1,
+            end: nextRegion.start - 1,
+            replacementLines: segmentLines,
+          };
+        } else {
+          // Can't find next segment either - try matching the segment more flexibly
+          // Look for any matching lines to determine position
+          region = findRegionForSegment(segment, originalLines, searchIndex);
+        }
+      }
+    }
+    
+    if (region === null) {
+      throw new Error(`Failed to locate segment ${segIdx + 1} in target file:\n${segment.substring(0, 200)}`);
+    }
+    
+    patches.push(region);
+    searchIndex = region.end + 1;
+  }
+
+  // Check for overlapping patches
+  for (let i = 0; i < patches.length - 1; i += 1) {
+    if (patches[i].end >= patches[i + 1].start) {
+      throw new Error('Overlapping patches detected; aborting edit to avoid corruption');
+    }
+  }
+
+  // Apply patches in order to build new file content
+  const newLines = [];
+  let cursor = 0;
+
+  for (const patch of patches) {
+    if (patch.start < cursor) {
+      throw new Error('Overlapping patches detected; aborting edit to avoid corruption');
+    }
+    // Unchanged region before this patch
+    for (let i = cursor; i < patch.start; i += 1) {
+      newLines.push(originalLines[i]);
+    }
+    // Replacement region
+    newLines.push(...patch.replacementLines);
+    cursor = patch.end + 1;
+  }
+
+  // Trailing unchanged region
+  for (let i = cursor; i < originalLines.length; i += 1) {
+    newLines.push(originalLines[i]);
+  }
+
+  return newLines.join('\n');
 }
 
 function toPosixPath(p) {
@@ -268,8 +585,8 @@ const toolHandlers = {
   async todo_write(args, context) {
     const { merge = false, todos } = args;
     
-    if (!Array.isArray(todos) || todos.length < 2) {
-      throw new Error('todos must be an array with at least 2 items');
+    if (!Array.isArray(todos) || todos.length < 1) {
+      throw new Error('todos must be an array with at least 1 item');
     }
     
     // Validate todo items
@@ -999,6 +1316,65 @@ const toolHandlers = {
       _diff: combinedDiff,
       _patchCommand: patchCommand,
     }
+  },
+
+  async edit_file(args, context) {
+    if (!args || !args.target_file) {
+      throw new Error('edit_file: "target_file" is required');
+    }
+    if (!args.code_edit) {
+      throw new Error('edit_file: "code_edit" is required');
+    }
+
+    const target = resolveTargetPath(args.target_file);
+    const baseRoot = process.cwd();
+    const relPath = path.relative(baseRoot, target);
+    const session = context && context.session;
+    const fileOriginals = session && session.data ? (session.data.fileOriginals || (session.data.fileOriginals = {})) : null;
+
+    // Read original content (null if file doesn't exist)
+    let originalContent = null;
+    try {
+      originalContent = await fsp.readFile(target, 'utf-8');
+    } catch (err) {
+      if (err && err.code !== 'ENOENT') {
+        throw new Error(`edit_file: failed to read file: ${err.message}`);
+      }
+      // File doesn't exist, originalContent remains null (new file)
+    }
+
+    // Store original content if not already stored
+    if (fileOriginals && !(relPath in fileOriginals)) {
+      fileOriginals[relPath] = originalContent || '';
+    }
+
+    // Apply edit using the helper function
+    let newContent;
+    try {
+      newContent = applyEditToFile(args.code_edit, originalContent);
+    } catch (err) {
+      throw new Error(`edit_file: failed to apply edit: ${err.message}`);
+    }
+
+    // Write new content
+    await fsp.mkdir(path.dirname(target), { recursive: true });
+    await fsp.writeFile(target, newContent, 'utf-8');
+
+    // Generate diff
+    let diff = null;
+    try {
+      const beforeContent = originalContent || '';
+      diff = await generateDiff(beforeContent, newContent, relPath);
+    } catch (err) {
+      // Ignore diff generation errors
+    }
+
+    return {
+      success: true,
+      target_file: args.target_file,
+      created: originalContent === null,
+      _diff: diff,
+    };
   },
 }
 
