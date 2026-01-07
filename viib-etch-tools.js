@@ -897,6 +897,15 @@ const toolHandlers = {
             throw new Error(`apply_patch: could not find context "${block.context}" in file ${hunk.filename}`);
           }
           pos = idx;
+        } else {
+          // Empty context (@@): reset pos to allow searching from the beginning
+          // or continue from current position if we're in the middle of processing
+          // Only reset if we haven't found a position yet
+          if (pos === 0 || block.lines.length === 0 || block.lines[0].type !== ' ') {
+            // Reset to allow fresh search, but keep current pos if we're continuing
+            // Actually, for empty context blocks, we should search from current pos forward
+            // Don't reset pos here - let the first context line find the position
+          }
         }
 
         for (const op of block.lines) {
@@ -907,10 +916,24 @@ const toolHandlers = {
             const trimLeading = (s) => s.replace(/^\s+/, '');
             const expected = trimLeading(op.content);
             // If we don't have a context position yet (empty @@ context), use this line to find it
-            if (pos === 0 && (!block.context || !block.context.trim())) {
-              const idx = fileLines.findIndex(l => l && trimLeading(l) === expected);
+            // Search from current pos forward, not from beginning
+            if ((!block.context || !block.context.trim())) {
+              // For empty context, search from current pos forward
+              const searchStart = pos;
+              const searchEnd = Math.min(fileLines.length, searchStart + 200);
+              let idx = -1;
+              for (let k = searchStart; k < searchEnd; k++) {
+                if (fileLines[k] && trimLeading(fileLines[k]) === expected) {
+                  idx = k;
+                  break;
+                }
+              }
               if (idx === -1) {
-                throw new Error(`apply_patch: could not find context line "${expected}" in file ${hunk.filename}`);
+                // If not found from pos forward, try from beginning
+                idx = fileLines.findIndex(l => l && trimLeading(l) === expected);
+                if (idx === -1) {
+                  throw new Error(`apply_patch: could not find context line "${expected}" in file ${hunk.filename}`);
+                }
               }
               pos = idx;
             }
