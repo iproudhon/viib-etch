@@ -891,7 +891,7 @@ const toolHandlers = {
       };
 
       for (const block of hunk.blocks) {
-        if (block.context) {
+        if (block.context && block.context.trim()) {
           const idx = findContextIndex(block.context);
           if (idx === -1) {
             throw new Error(`apply_patch: could not find context "${block.context}" in file ${hunk.filename}`);
@@ -901,8 +901,21 @@ const toolHandlers = {
 
         for (const op of block.lines) {
           if (op.type === ' ') {
-            const expected = op.content;
-            if (fileLines[pos] === expected) {
+            // Context lines: trim leading whitespace for flexible matching
+            // This handles cases where GPT-5.1 adds leading spaces to context lines
+            // Only trim leading spaces, preserve trailing spaces
+            const trimLeading = (s) => s.replace(/^\s+/, '');
+            const expected = trimLeading(op.content);
+            // If we don't have a context position yet (empty @@ context), use this line to find it
+            if (pos === 0 && (!block.context || !block.context.trim())) {
+              const idx = fileLines.findIndex(l => l && trimLeading(l) === expected);
+              if (idx === -1) {
+                throw new Error(`apply_patch: could not find context line "${expected}" in file ${hunk.filename}`);
+              }
+              pos = idx;
+            }
+            const actual = fileLines[pos] ? trimLeading(fileLines[pos]) : '';
+            if (actual === expected) {
               pos++;
               continue;
             }
@@ -910,7 +923,7 @@ const toolHandlers = {
             const windowEnd = Math.min(fileLines.length, pos + 50);
             let found = -1;
             for (let k = pos; k < windowEnd; k++) {
-              if (fileLines[k] === expected) {
+              if (fileLines[k] && trimLeading(fileLines[k]) === expected) {
                 found = k;
                 break;
               }
