@@ -632,7 +632,7 @@ const toolHandlers = {
     return {
       success: true,
       todo_count: session.data.todos.length,
-      message: merge ? 'Todos merged successfully' : 'Todos replaced successfully'
+      message: `${merge ? 'Todos merged successfully' : 'Todos replaced successfully'}\n\nCurrent todos:\n${JSON.stringify(session.data.todos)}`
     }
   },
 
@@ -1390,7 +1390,7 @@ function getToolDefinitions(filePath, tool_names = []) {
   // Pass it as an option to `ChatLLM.complete()` / `ChatLLM.send()` instead.
   const builtinTools = [];
   for (const name of tool_names) {
-    if (name === 'web_search_preview' || name === 'web_search_preview_2025_03_11') {
+    if (name === 'web_search_preview' || name === 'web_search_preview_2025_03_11' || name === "googleSearch" || name === "codeExecution") {
       builtinTools.push({ type: name });
     }
     // Future built-ins could go here (file_search, code_interpreter, etc.) once you decide on their configs.

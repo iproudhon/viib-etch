@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { OpenAI } = require('openai');
+const { GoogleGenAI } = require('@google/genai');
 
 let modelsFileName = path.join(__dirname, 'viib-etch-models.json')
 let chatsDir = path.join(__dirname, 'chats')
@@ -73,6 +74,7 @@ class ChatModel {
     this.tools = Array.isArray(config.tools) ? config.tools : null;
     
     // Load API key - prioritize file if specified, then config, then env var
+    // For Gemini models, check GEMINI_API_KEY env var; otherwise use OPENAI_API_KEY
     if (this.api_key_file) {
       try {
         const keyPath = resolveConfigFile(this.api_key_file);
@@ -81,12 +83,18 @@ class ChatModel {
         throw new Error(`Failed to load API key from ${this.api_key_file}: ${err.message}`);
       }
     } else {
-      this.api_key = config.api_key || process.env.OPENAI_API_KEY;
+      const isGemini = this._isGeminiModel();
+      this.api_key = config.api_key || (isGemini ? process.env.GEMINI_API_KEY : process.env.OPENAI_API_KEY);
     }
     
     if (!this.api_key) {
       throw new Error(`API key not provided for model ${this.name}`);
     }
+  }
+
+  _isGeminiModel() {
+    const modelName = (this.model || '').toLowerCase();
+    return modelName.includes('gemini') || modelName.startsWith('google/');
   }
 
   readSystemPromptFileFresh() {
@@ -379,13 +387,24 @@ class ChatLLM {
     return this._model;
   }
 
+  _isGeminiModel() {
+    const model = this._ensureModelResolved();
+    return model._isGeminiModel();
+  }
+
   getClient() {
     const model = this._ensureModelResolved();
     if (!this._client) {
-      this._client = new OpenAI({
-        apiKey: model.api_key,
-        baseURL: model.base_url
-      });
+      if (model._isGeminiModel()) {
+        this._client = new GoogleGenAI({
+          apiKey: model.api_key
+        });
+      } else {
+        this._client = new OpenAI({
+          apiKey: model.api_key,
+          baseURL: model.base_url
+        });
+      }
     }
     return this._client;
   }
@@ -734,54 +753,95 @@ class ChatLLM {
     
     try {
       const model = this._ensureModelResolved();
-      const client = this.getClient();
+      const isGemini = this._isGeminiModel();
       
-      // Create a title generation request with the first exchange
-      const titleMessages = [
-        {
-          role: 'system',
-          content: 'Generate a concise, descriptive title (maximum 10 words) for this conversation based on the user\'s request and your response. Return only the title, nothing else.'
-        },
-        {
-          role: 'user',
-          content: userMessages[0].content || ''
+      if (isGemini) {
+        // Use Gemini API for title generation
+        const client = this.getClient();
+        const modelName = model.model.replace(/^google\//, '');
+        
+        const titleContents = [
+          { role: 'user', parts: [{ text: userMessages[0].content || '' }] }
+        ];
+        
+        if (assistantMessages[0] && assistantMessages[0].content) {
+          titleContents.push({
+            role: 'model',
+            parts: [{ text: String(assistantMessages[0].content).substring(0, 500) }]
+          });
         }
-      ];
-      
-      // Include first assistant response if available
-      if (assistantMessages[0] && assistantMessages[0].content) {
-        titleMessages.push({
-          role: 'assistant',
-          content: String(assistantMessages[0].content).substring(0, 500) // Limit context
-        });
-      }
-      
-      // Use max_completion_tokens for newer models (GPT-5+), max_tokens for older models
-      const modelName = model.model.toLowerCase();
-      const useMaxCompletionTokens = modelName.startsWith('gpt-5') || modelName.startsWith('gpt-4o') || modelName.startsWith('gpt-4-turbo');
-      
-      const titleParams = {
-        model: model.model,
-        messages: titleMessages,
-      };
-      
-      if (useMaxCompletionTokens) {
-        titleParams.max_completion_tokens = 50;
+        
+        const titleRequest = {
+          model: modelName,
+          contents: titleContents,
+          config: {
+            systemInstruction: 'Generate a concise, descriptive title (maximum 10 words) for this conversation based on the user\'s request and your response. Return only the title, nothing else.',
+            maxOutputTokens: 50
+          }
+        };
+        
+        const response = await client.models.generateContent(titleRequest);
+        const title = this._extractTextFromGeminiResponse(response)?.trim();
+        
+        if (title) {
+          const cleanTitle = title.replace(/^["']|["']$/g, '').trim();
+          if (cleanTitle && cleanTitle.length > 0) {
+            this.chat.title = cleanTitle.substring(0, 200);
+            this.chat.save();
+            await this.callHook('onTitle', this.chat.title);
+          }
+        }
       } else {
-        titleParams.max_tokens = 50;
-      }
-      
-      const response = await client.chat.completions.create(titleParams);
-      
-      const title = response.choices[0]?.message?.content?.trim();
-      if (title) {
-        // Clean up the title - remove quotes, extra whitespace, etc.
-        const cleanTitle = title.replace(/^["']|["']$/g, '').trim();
-        if (cleanTitle && cleanTitle.length > 0) {
-          this.chat.title = cleanTitle.substring(0, 200); // Cap at 200 chars
-          this.chat.save();
-          // Call onTitle hook
-          await this.callHook('onTitle', this.chat.title);
+        // Use OpenAI API for title generation
+        const client = this.getClient();
+        
+        // Create a title generation request with the first exchange
+        const titleMessages = [
+          {
+            role: 'system',
+            content: 'Generate a concise, descriptive title (maximum 10 words) for this conversation based on the user\'s request and your response. Return only the title, nothing else.'
+          },
+          {
+            role: 'user',
+            content: userMessages[0].content || ''
+          }
+        ];
+        
+        // Include first assistant response if available
+        if (assistantMessages[0] && assistantMessages[0].content) {
+          titleMessages.push({
+            role: 'assistant',
+            content: String(assistantMessages[0].content).substring(0, 500) // Limit context
+          });
+        }
+        
+        // Use max_completion_tokens for newer models (GPT-5+), max_tokens for older models
+        const modelName = model.model.toLowerCase();
+        const useMaxCompletionTokens = modelName.startsWith('gpt-5') || modelName.startsWith('gpt-4o') || modelName.startsWith('gpt-4-turbo');
+        
+        const titleParams = {
+          model: model.model,
+          messages: titleMessages,
+        };
+        
+        if (useMaxCompletionTokens) {
+          titleParams.max_completion_tokens = 50;
+        } else {
+          titleParams.max_tokens = 50;
+        }
+        
+        const response = await client.chat.completions.create(titleParams);
+        
+        const title = response.choices[0]?.message?.content?.trim();
+        if (title) {
+          // Clean up the title - remove quotes, extra whitespace, etc.
+          const cleanTitle = title.replace(/^["']|["']$/g, '').trim();
+          if (cleanTitle && cleanTitle.length > 0) {
+            this.chat.title = cleanTitle.substring(0, 200); // Cap at 200 chars
+            this.chat.save();
+            // Call onTitle hook
+            await this.callHook('onTitle', this.chat.title);
+          }
         }
       }
     } catch (err) {
@@ -870,6 +930,14 @@ class ChatLLM {
     }
 
     try {
+      // Route Gemini models to Gemini-specific methods
+      if (this._isGeminiModel()) {
+        const p = stream
+          ? this._completeStreamGemini(params, requestOptions)
+          : this._completeNoStreamGemini(params, requestOptions);
+        return await p;
+      }
+      
       const p = stream
         ? (useResponsesAPI
           ? this._completeStreamResponses(params, requestOptions)
@@ -886,6 +954,569 @@ class ChatLLM {
       // Clear processes map but don't kill them (they may still be running)
       this._activeProcesses.clear();
     }
+  }
+  
+  // Convert OpenAI message format to Google Gemini format
+  _convertMessagesToGeminiFormat(messages) {
+    const contents = [];
+    
+    for (const msg of messages) {
+      if (msg.role === 'system') {
+        // System messages are handled separately in Gemini
+        continue;
+      }
+      
+      if (msg.role === 'user') {
+        const parts = [];
+        if (msg.content) {
+          parts.push({ text: String(msg.content) });
+        }
+        if (parts.length > 0) {
+          contents.push({ role: 'user', parts });
+        }
+      } else if (msg.role === 'assistant') {
+        const parts = [];
+        if (msg.content) {
+          parts.push({ text: String(msg.content) });
+        }
+        
+        // Handle tool calls in assistant messages
+        const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : null;
+        if (toolCalls) {
+          const functionCallParts = [];
+          for (const toolCall of toolCalls) {
+            try {
+              const args = JSON.parse(toolCall.function?.arguments || '{}');
+              const name = toolCall.function?.name || '';
+              const thoughtSignature =
+                toolCall.thoughtSignature ??
+                toolCall.thought_signature ??
+                toolCall._thoughtSignature ??
+                null;
+
+              const fcPart = {
+                functionCall: { name, args },
+              };
+              // Gemini requires thoughtSignature on the first functionCall part in a tool-calling turn.
+              // If we don't have it, it's safer to omit functionCall parts entirely than to 400.
+              if (thoughtSignature) {
+                fcPart.thoughtSignature = thoughtSignature;
+              }
+              functionCallParts.push(fcPart);
+            } catch (e) {
+              // Skip invalid tool calls
+            }
+          }
+
+          // Only include functionCall parts if the first functionCall has a thoughtSignature somewhere
+          // (Gemini validates tool-calling turns strictly).
+          const hasAnyThoughtSignature = functionCallParts.some(p => p.thoughtSignature);
+          if (hasAnyThoughtSignature) {
+            // Preserve ordering: if Gemini produced parallel calls, thoughtSignature is only on one part.
+            parts.push(...functionCallParts);
+          } else {
+            // Fallback: keep a textual hint so the model has some context, but avoid invalid tool parts.
+            const names = functionCallParts
+              .map(p => p?.functionCall?.name)
+              .filter(Boolean);
+            if (names.length > 0) {
+              parts.push({ text: `[tools requested: ${names.join(', ')}]` });
+            }
+          }
+        }
+        
+        if (parts.length > 0) {
+          contents.push({ role: 'model', parts });
+        }
+      } else if (msg.role === 'tool') {
+        // Tool outputs must be sent back as a separate `role: 'user'` message with functionResponse.
+        const name = msg.name || '';
+        let response;
+        try {
+          response = (typeof msg.content === 'string') ? JSON.parse(msg.content) : msg.content;
+        } catch (e) {
+          response = String(msg.content || '');
+        }
+        contents.push({
+          role: 'user',
+          parts: [{ functionResponse: { name, response } }],
+        });
+      }
+    }
+    return contents;
+  }
+  
+  // Convert OpenAI tool format to Google Gemini format
+  _convertToolsToGeminiFormat(tools) {
+    if (!tools || !Array.isArray(tools)) return null;
+    
+    const outTools = [];
+    const functionDeclarations = [];
+    for (const tool of tools) {
+      if (!tool || typeof tool !== 'object') continue;
+
+      // Built-in Gemini tools (non-function tools)
+      // We represent them internally as { type: 'googleSearch' } / { type: 'codeExecution' }.
+      // Gemini expects tool objects like { googleSearch: {} } / { codeExecution: {} }.
+      if (tool.type === 'googleSearch' || tool.type === 'google_search') {
+        outTools.push({ googleSearch: {} });
+        continue;
+      }
+      if (tool.type === 'codeExecution' || tool.type === 'code_execution') {
+        outTools.push({ codeExecution: {} });
+        continue;
+      }
+
+      // Function tools
+      if (tool.type === 'function' && tool.function) {
+        functionDeclarations.push({
+          name: tool.function.name,
+          description: tool.function.description || '',
+          parameters: tool.function.parameters || {}
+        });
+      } else if (tool.type === 'function' && tool.name) {
+        // Already in Gemini format
+        functionDeclarations.push({
+          name: tool.name,
+          description: tool.description || '',
+          parameters: tool.parameters || {}
+        });
+      }
+    }
+    
+    // NOTE: Gemini (via @google/genai) currently rejects mixing built-in tools
+    // (e.g. googleSearch/codeExecution) with functionDeclarations in the same request.
+    // If built-ins are present, prefer them and omit functionDeclarations.
+    if (functionDeclarations.length > 0 && outTools.length === 0) {
+      outTools.push({ functionDeclarations });
+    }
+
+    return outTools.length > 0 ? outTools : null;
+  }
+  
+  // Extract tool calls from Gemini response
+  _extractToolCallsFromGeminiResponse(response) {
+    if (!response.candidates || !response.candidates[0]) return null;
+    const candidate = response.candidates[0];
+    if (!candidate.content || !candidate.content.parts) return null;
+    
+    const toolCalls = [];
+    for (const part of candidate.content.parts) {
+      if (part.functionCall) {
+        const thoughtSignature =
+          part.thoughtSignature ??
+          part.thought_signature ??
+          part.functionCall?.thoughtSignature ??
+          part.functionCall?.thought_signature ??
+          null;
+        toolCalls.push({
+          id: `call_${crypto.randomBytes(8).toString('hex')}`,
+          type: 'function',
+          thoughtSignature,
+          function: {
+            name: part.functionCall.name,
+            arguments: JSON.stringify(part.functionCall.args || {})
+          }
+        });
+      }
+    }
+    return toolCalls.length > 0 ? toolCalls : null;
+  }
+  
+  // Extract text content from Gemini response
+  _extractTextFromGeminiResponse(response) {
+    if (!response.candidates || !response.candidates[0]) return null;
+    const candidate = response.candidates[0];
+    if (!candidate.content || !candidate.content.parts) return null;
+    
+    let text = '';
+    for (const part of candidate.content.parts) {
+      if (part.text) {
+        text += part.text;
+      }
+    }
+    return text || null;
+  }
+  
+  // Google Gemini API - non-streaming
+  async _completeNoStreamGemini(params, requestOptions = undefined) {
+    const max_iterations = params.max_iterations || 100;
+    const tools = params.tools;
+    delete params.max_iterations; // Remove from API params
+    
+    let iteration = 0;
+    let lastResult = null;
+    let accumulatedUsage = null;
+    
+    const model = this._ensureModelResolved();
+    const client = this.getClient();
+    const modelName = model.model.replace(/^google\//, ''); // Remove 'google/' prefix if present
+    
+    while (iteration < max_iterations) {
+      // Check for cancellation
+      if (this._isCancelled()) {
+        throw new Error('Operation cancelled');
+      }
+      
+      // Get messages in OpenAI format, then convert to Gemini format
+      const openAIMessages = this.chat.getMessagesForAPI();
+      const geminiContents = this._convertMessagesToGeminiFormat(openAIMessages);
+      
+      // Get system instruction if present
+      let systemInstruction = null;
+      if (openAIMessages.length > 0 && openAIMessages[0].role === 'system') {
+        systemInstruction = openAIMessages[0].content;
+      }
+      
+      // Build Gemini request
+      const geminiRequest = {
+        model: modelName,
+        contents: geminiContents
+      };
+      
+      // Build config object for optional parameters
+      const config = {};
+      if (systemInstruction) {
+        config.systemInstruction = systemInstruction;
+      }
+      if (tools) {
+        const geminiTools = this._convertToolsToGeminiFormat(tools);
+        if (geminiTools) {
+          config.tools = geminiTools;
+        }
+      }
+      if (params.temperature !== null && params.temperature !== undefined) {
+        config.temperature = params.temperature;
+      }
+      if (params.max_tokens !== null && params.max_tokens !== undefined) {
+        config.maxOutputTokens = params.max_tokens;
+      }
+      // Best-effort: map viib-etch `reasoning_effort` to Gemini "thinking" controls.
+      // Prefer `thinkingLevel` for Gemini 3.x, and use `thinkingBudget` as fallback for numeric budgets / non-3.x models.
+      // We do NOT request thought summaries (includeThoughts=false).
+      if (params.reasoning_effort !== null && params.reasoning_effort !== undefined && config.thinkingConfig === undefined) {
+        const effRaw = params.reasoning_effort;
+        const effStr = String(effRaw).toLowerCase();
+
+        // If user passes a numeric budget, honor it.
+        const asNum = Number(effRaw);
+        const hasNumericBudget = Number.isFinite(asNum) && String(effRaw).trim() !== '';
+
+        if (modelName.startsWith('gemini-3') && !hasNumericBudget) {
+          // Gemini 3 Pro supports LOW/HIGH; Flash supports MINIMAL/LOW/MEDIUM/HIGH.
+          const isFlash = modelName.includes('flash');
+          let thinkingLevel = null;
+          if (effStr === 'low') thinkingLevel = 'LOW';
+          else if (effStr === 'high') thinkingLevel = 'HIGH';
+          else if (effStr === 'medium') thinkingLevel = isFlash ? 'MEDIUM' : 'HIGH';
+          else if (effStr === 'minimal') thinkingLevel = isFlash ? 'MINIMAL' : 'LOW';
+          else if (effStr === 'on' || effStr === 'auto') thinkingLevel = 'HIGH';
+
+          if (thinkingLevel) {
+            config.thinkingConfig = { thinkingLevel, includeThoughts: false };
+          }
+        } else {
+          // Fallback: thinkingBudget controls thinking depth for models that support budgets.
+          let thinkingBudget = null;
+          if (hasNumericBudget) thinkingBudget = asNum;
+          else if (effStr === 'on' || effStr === 'auto') thinkingBudget = -1;
+          else if (effStr === 'low') thinkingBudget = 64;
+          else if (effStr === 'medium') thinkingBudget = 256;
+          else if (effStr === 'high') thinkingBudget = 1024;
+          if (thinkingBudget !== null) {
+            config.thinkingConfig = { thinkingBudget, includeThoughts: false };
+          }
+        }
+      }
+      if (Object.keys(config).length > 0) {
+        geminiRequest.config = config;
+      }
+      
+      const requestStartTime = Date.now();
+      await this.callHook('onRequestStart');
+      
+      let response;
+      try {
+        response = await client.models.generateContent(geminiRequest);
+      } catch (error) {
+        // Handle errors
+        throw error;
+      }
+      
+      const requestDoneTime = Date.now();
+      const requestElapsed = requestDoneTime - requestStartTime;
+      await this.callHook('onRequestDone', requestElapsed);
+      
+      // Extract content and tool calls
+      const content = this._extractTextFromGeminiResponse(response);
+      const toolCalls = this._extractToolCallsFromGeminiResponse(response);
+      
+      // Build structured assistant message
+      const assistantMessage = {
+        role: 'assistant',
+        content: content || '',
+        reasoning: null,
+        tool_calls: toolCalls
+      };
+      
+      let firstEventAfterRequestDone = true;
+      
+      // Handle response content
+      if (content) {
+        const responseStartTime = Date.now();
+        const sinceRequestDone = firstEventAfterRequestDone ? Date.now() - requestDoneTime : null;
+        await this.callHook('onResponseStart', sinceRequestDone);
+        firstEventAfterRequestDone = false;
+        await this.callHook('onResponseData', content);
+        const responseElapsed = Date.now() - responseStartTime;
+        await this.callHook('onResponseDone', content, responseElapsed);
+      }
+      
+      // Add message to chat
+      this.chat.addMessage(assistantMessage);
+      
+      // Generate title if not already set
+      if (assistantMessage.content) {
+        await this._generateTitle();
+      }
+      
+      lastResult = {
+        message: assistantMessage,
+        content: content,
+        tool_calls: toolCalls,
+        reasoning: null,
+        usage: response.usage || null,
+        finish_reason: null
+      };
+      
+      // Check for cancellation before tool execution
+      if (this._isCancelled()) {
+        throw new Error('Operation cancelled');
+      }
+      
+      // Automatically execute tool calls if present
+      if (toolCalls && toolCalls.length > 0) {
+        await this._executeToolCallsInternal({
+          tool_calls: toolCalls
+        });
+        // Continue loop for next iteration
+        iteration++;
+      } else {
+        // No tool calls, we're done
+        return lastResult;
+      }
+    }
+    
+    // Max iterations reached
+    return lastResult;
+  }
+  
+  // Google Gemini API - streaming
+  async _completeStreamGemini(params, requestOptions = undefined) {
+    const max_iterations = params.max_iterations || 100;
+    const tools = params.tools;
+    delete params.max_iterations; // Remove from API params
+    
+    let iteration = 0;
+    let lastResult = null;
+    
+    const model = this._ensureModelResolved();
+    const client = this.getClient();
+    const modelName = model.model.replace(/^google\//, ''); // Remove 'google/' prefix if present
+    
+    while (iteration < max_iterations) {
+      // Check for cancellation
+      if (this._isCancelled()) {
+        throw new Error('Operation cancelled');
+      }
+      
+      // Get messages in OpenAI format, then convert to Gemini format
+      const openAIMessages = this.chat.getMessagesForAPI();
+      const geminiContents = this._convertMessagesToGeminiFormat(openAIMessages);
+      
+      // Get system instruction if present
+      let systemInstruction = null;
+      if (openAIMessages.length > 0 && openAIMessages[0].role === 'system') {
+        systemInstruction = openAIMessages[0].content;
+      }
+      
+      // Build Gemini request
+      const geminiRequest = {
+        model: modelName,
+        contents: geminiContents
+      };
+      
+      // Build config object for optional parameters
+      const config = {};
+      if (systemInstruction) {
+        config.systemInstruction = systemInstruction;
+      }
+      if (tools) {
+        const geminiTools = this._convertToolsToGeminiFormat(tools);
+        if (geminiTools) {
+          config.tools = geminiTools;
+        }
+      }
+      if (params.temperature !== null && params.temperature !== undefined) {
+        config.temperature = params.temperature;
+      }
+      if (params.max_tokens !== null && params.max_tokens !== undefined) {
+        config.maxOutputTokens = params.max_tokens;
+      }
+      // Best-effort: map viib-etch `reasoning_effort` to Gemini "thinking" controls.
+      // Prefer `thinkingLevel` for Gemini 3.x, and use `thinkingBudget` as fallback for numeric budgets / non-3.x models.
+      // We do NOT request thought summaries (includeThoughts=false).
+      if (params.reasoning_effort !== null && params.reasoning_effort !== undefined && config.thinkingConfig === undefined) {
+        const effRaw = params.reasoning_effort;
+        const effStr = String(effRaw).toLowerCase();
+
+        // If user passes a numeric budget, honor it.
+        const asNum = Number(effRaw);
+        const hasNumericBudget = Number.isFinite(asNum) && String(effRaw).trim() !== '';
+
+        if (modelName.startsWith('gemini-3') && !hasNumericBudget) {
+          // Gemini 3 Pro supports LOW/HIGH; Flash supports MINIMAL/LOW/MEDIUM/HIGH.
+          const isFlash = modelName.includes('flash');
+          let thinkingLevel = null;
+          if (effStr === 'low') thinkingLevel = 'LOW';
+          else if (effStr === 'high') thinkingLevel = 'HIGH';
+          else if (effStr === 'medium') thinkingLevel = isFlash ? 'MEDIUM' : 'HIGH';
+          else if (effStr === 'minimal') thinkingLevel = isFlash ? 'MINIMAL' : 'LOW';
+          else if (effStr === 'on' || effStr === 'auto') thinkingLevel = 'HIGH';
+
+          if (thinkingLevel) {
+            config.thinkingConfig = { thinkingLevel, includeThoughts: false };
+          }
+        } else {
+          // Fallback: thinkingBudget controls thinking depth for models that support budgets.
+          let thinkingBudget = null;
+          if (hasNumericBudget) thinkingBudget = asNum;
+          else if (effStr === 'on' || effStr === 'auto') thinkingBudget = -1;
+          else if (effStr === 'low') thinkingBudget = 64;
+          else if (effStr === 'medium') thinkingBudget = 256;
+          else if (effStr === 'high') thinkingBudget = 1024;
+          if (thinkingBudget !== null) {
+            config.thinkingConfig = { thinkingBudget, includeThoughts: false };
+          }
+        }
+      }
+      if (Object.keys(config).length > 0) {
+        geminiRequest.config = config;
+      }
+      
+      const requestStartTime = Date.now();
+      await this.callHook('onRequestStart');
+      
+      let stream;
+      try {
+        stream = await client.models.generateContentStream(geminiRequest);
+      } catch (error) {
+        throw error;
+      }
+      
+      const requestDoneTime = Date.now();
+      const requestElapsed = requestDoneTime - requestStartTime;
+      await this.callHook('onRequestDone', requestElapsed);
+      
+      let fullContent = '';
+      const toolCalls = {};
+      let hasStartedResponse = false;
+      let responseStartTime = null;
+      let firstEventAfterRequestDone = true;
+      
+      // Process streaming response
+      for await (const chunk of stream) {
+        // Check for cancellation during streaming
+        if (this._isCancelled()) {
+          throw new Error('Operation cancelled');
+        }
+        
+        if (!chunk.candidates || !chunk.candidates[0]) continue;
+        const candidate = chunk.candidates[0];
+        if (!candidate.content || !candidate.content.parts) continue;
+        
+        for (const part of candidate.content.parts) {
+          // Handle text content
+          if (part.text) {
+            if (!hasStartedResponse) {
+              responseStartTime = Date.now();
+              const sinceRequestDone = firstEventAfterRequestDone ? Date.now() - requestDoneTime : null;
+              await this.callHook('onResponseStart', sinceRequestDone);
+              firstEventAfterRequestDone = false;
+              hasStartedResponse = true;
+            }
+            fullContent += part.text;
+            await this.callHook('onResponseData', part.text);
+          }
+          
+          // Handle function calls (tool calls)
+          if (part.functionCall) {
+            const callId = `call_${crypto.randomBytes(8).toString('hex')}`;
+            const index = Object.keys(toolCalls).length;
+            const thoughtSignature =
+              part.thoughtSignature ??
+              part.thought_signature ??
+              part.functionCall?.thoughtSignature ??
+              part.functionCall?.thought_signature ??
+              null;
+            toolCalls[index] = {
+              id: callId,
+              type: 'function',
+              thoughtSignature,
+              function: {
+                name: part.functionCall.name || '',
+                arguments: JSON.stringify(part.functionCall.args || {})
+              }
+            };
+          }
+        }
+      }
+      
+      // End response
+      if (hasStartedResponse && responseStartTime !== null) {
+        const responseElapsed = Date.now() - responseStartTime;
+        await this.callHook('onResponseDone', fullContent, responseElapsed);
+      }
+      
+      // Build structured assistant message
+      const toolCallsArray = Object.values(toolCalls).filter(tc => tc.id);
+      const assistantMessage = {
+        role: 'assistant',
+        content: fullContent || '',
+        reasoning: null,
+        tool_calls: toolCallsArray.length > 0 ? toolCallsArray : null
+      };
+      
+      // Add message to chat
+      this.chat.addMessage(assistantMessage);
+      
+      // Generate title if not already set
+      if (assistantMessage.content) {
+        await this._generateTitle();
+      }
+      
+      lastResult = assistantMessage;
+      
+      // Check for cancellation before tool execution
+      if (this._isCancelled()) {
+        throw new Error('Operation cancelled');
+      }
+      
+      // Automatically execute tool calls if present
+      if (toolCallsArray.length > 0) {
+        await this._executeToolCallsInternal({
+          tool_calls: toolCallsArray
+        });
+        // Continue loop for next iteration
+        iteration++;
+      } else {
+        // No tool calls, we're done
+        return lastResult;
+      }
+    }
+    
+    // Max iterations reached
+    return lastResult;
   }
   
   // /v1/chat/completions API - non-streaming
