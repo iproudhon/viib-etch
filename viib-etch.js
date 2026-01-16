@@ -326,6 +326,9 @@ class ChatLLM {
     this._model = null;
     this._client = null;
     this.tools = tools || null;
+    // In-memory (non-persistent) default; if set, it will be used unless overridden per-call.
+    // NOTE: This is NOT saved into ChatSession JSON.
+    this.reasoning_effort = undefined;
     this.hooks = {
       onRequestStart: hooks.onRequestStart || null,
       onRequestDone: hooks.onRequestDone || null,
@@ -342,6 +345,18 @@ class ChatLLM {
     };
     this._abortController = null;
     this._activeProcesses = new Map();
+  }
+
+  // Set a default reasoning effort for this ChatLLM instance (non-persistent).
+  // Pass null/undefined/'default'/'' to clear (i.e., use model/provider default).
+  setReasoningEffort(effort) {
+    const v = (typeof effort === 'string') ? effort.trim() : effort;
+    if (v === null || v === undefined || v === '' || String(v).toLowerCase() === 'default') {
+      this.reasoning_effort = undefined;
+    } else {
+      this.reasoning_effort = v;
+    }
+    return this;
   }
   
   static newChatSession(model_name, persistent = false, tools = null, hooks = {}) {
@@ -850,12 +865,13 @@ class ChatLLM {
   }
 
   async complete(options = {}) {
+    const hasReasoningEffort = Object.prototype.hasOwnProperty.call(options, 'reasoning_effort');
     const {
       tools = this.tools,
       stream = false,
       temperature = null,
       max_tokens = null,
-      reasoning_effort = null,
+      reasoning_effort = undefined,
       max_iterations = 100,
       timeout_ms = null,
       ...extraOptions
@@ -885,12 +901,22 @@ class ChatLLM {
        params.max_tokens = max_tokens;
      }
  
-     // reasoning_effort: explicit option wins; else model default (if not "off")
-     const eff = (reasoning_effort !== null && reasoning_effort !== 'off')
-       ? reasoning_effort
-       : (model.reasoning_effort && model.reasoning_effort !== 'off' ? model.reasoning_effort : null);
-     if (eff) {
-       params.reasoning_effort = eff;
+     // reasoning_effort:
+     // - If explicitly provided via options, include it (even "off") to override the model/provider default.
+     // - Otherwise, omit it entirely so the model/provider default reasoning behavior applies.
+     const resolveEff = (effRaw) => {
+       const eff = (typeof effRaw === 'string') ? effRaw.trim() : effRaw;
+       if (eff === null || eff === undefined || eff === '' || String(eff).toLowerCase() === 'default') {
+         return undefined; // omit
+       }
+       return eff; // include (including "off")
+     };
+     if (hasReasoningEffort) {
+       const eff = resolveEff(reasoning_effort);
+       if (eff !== undefined) params.reasoning_effort = eff;
+     } else {
+       const eff = resolveEff(this.reasoning_effort);
+       if (eff !== undefined) params.reasoning_effort = eff;
      }
     
     // Route to appropriate API method

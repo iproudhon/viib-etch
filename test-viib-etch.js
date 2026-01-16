@@ -413,8 +413,11 @@ async function testReasoningHooks(models) {
     return;
   }
   
-  // Find a model that supports reasoning (like o1)
-  const reasoningModel = models.find(m => m.reasoning_effort) || models[0];
+  // Find a model that supports reasoning (prefer non-"off")
+  const reasoningModel =
+    models.find(m => m.reasoning_effort && String(m.reasoning_effort).toLowerCase() !== 'off') ||
+    models.find(m => m.reasoning_effort) ||
+    models[0];
   console.log(`Testing reasoning hooks with model: ${reasoningModel.name}`);
   
   const llm = ChatLLM.newChatSession(reasoningModel.name, false, null, {
@@ -433,8 +436,10 @@ async function testReasoningHooks(models) {
   // Test with reasoning (only if model supports it)
   if (reasoningModel.reasoning_effort && reasoningModel.reasoning_effort !== 'off') {
     try {
+      // Set ChatLLM-level (non-persistent) default reasoning effort.
+      llm.setReasoningEffort(reasoningModel.reasoning_effort);
       const result = await llm.complete({
-        stream: true
+        stream: true,
       });
       console.log('\nReasoning test completed');
     } catch (err) {
