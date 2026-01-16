@@ -1131,7 +1131,24 @@ class ChatLLM {
     
     let text = '';
     for (const part of candidate.content.parts) {
-      if (part.text) {
+      // When includeThoughts is enabled, Gemini may emit thought text parts with { thought: true }.
+      // Keep "final" text here and extract thought text separately.
+      if (part.text && !part.thought) {
+        text += part.text;
+      }
+    }
+    return text || null;
+  }
+
+  // Extract "thoughts" / reasoning text from Gemini response (when includeThoughts is enabled)
+  _extractReasoningFromGeminiResponse(response) {
+    if (!response.candidates || !response.candidates[0]) return null;
+    const candidate = response.candidates[0];
+    if (!candidate.content || !candidate.content.parts) return null;
+
+    let text = '';
+    for (const part of candidate.content.parts) {
+      if (part.text && part.thought) {
         text += part.text;
       }
     }
@@ -1191,6 +1208,19 @@ class ChatLLM {
       if (params.max_tokens !== null && params.max_tokens !== undefined) {
         config.maxOutputTokens = params.max_tokens;
       }
+      // If reasoning is enabled, request thought summaries so we can populate assistantMessage.reasoning.
+      // Caller can override by passing include_thoughts explicitly.
+      if (params.include_thoughts !== null && params.include_thoughts !== undefined) {
+        config.thinkingConfig = {
+          ...(config.thinkingConfig || {}),
+          includeThoughts: !!params.include_thoughts,
+        };
+      } else if (params.reasoning_effort !== null && params.reasoning_effort !== undefined && String(params.reasoning_effort).toLowerCase() !== 'off') {
+        config.thinkingConfig = {
+          ...(config.thinkingConfig || {}),
+          includeThoughts: true,
+        };
+      }
       // Best-effort: map viib-etch `reasoning_effort` to Gemini "thinking" controls.
       // Prefer `thinkingLevel` for Gemini 3.x, and use `thinkingBudget` as fallback for numeric budgets / non-3.x models.
       // We do NOT request thought summaries (includeThoughts=false).
@@ -1247,7 +1277,8 @@ class ChatLLM {
       const requestElapsed = requestDoneTime - requestStartTime;
       await this.callHook('onRequestDone', requestElapsed);
       
-      // Extract content and tool calls
+      // Extract content/reasoning and tool calls
+      const reasoning = this._extractReasoningFromGeminiResponse(response);
       const content = this._extractTextFromGeminiResponse(response);
       const toolCalls = this._extractToolCallsFromGeminiResponse(response);
       
@@ -1255,12 +1286,23 @@ class ChatLLM {
       const assistantMessage = {
         role: 'assistant',
         content: content || '',
-        reasoning: null,
+        reasoning: reasoning || null,
         tool_calls: toolCalls
       };
       
       let firstEventAfterRequestDone = true;
       
+      // Handle reasoning (Gemini thoughts) similar to OpenAI reasoning channel
+      if (reasoning) {
+        const reasoningStartTime = Date.now();
+        const sinceRequestDone = firstEventAfterRequestDone ? Date.now() - requestDoneTime : null;
+        await this.callHook('onReasoningStart', sinceRequestDone);
+        firstEventAfterRequestDone = false;
+        await this.callHook('onReasoningData', reasoning);
+        const reasoningElapsed = Date.now() - reasoningStartTime;
+        await this.callHook('onReasoningDone', reasoning, reasoningElapsed);
+      }
+
       // Handle response content
       if (content) {
         const responseStartTime = Date.now();
@@ -1363,6 +1405,19 @@ class ChatLLM {
       if (params.max_tokens !== null && params.max_tokens !== undefined) {
         config.maxOutputTokens = params.max_tokens;
       }
+      // If reasoning is enabled, request thought summaries so we can populate assistantMessage.reasoning.
+      // Caller can override by passing include_thoughts explicitly.
+      if (params.include_thoughts !== null && params.include_thoughts !== undefined) {
+        config.thinkingConfig = {
+          ...(config.thinkingConfig || {}),
+          includeThoughts: !!params.include_thoughts,
+        };
+      } else if (params.reasoning_effort !== null && params.reasoning_effort !== undefined && String(params.reasoning_effort).toLowerCase() !== 'off') {
+        config.thinkingConfig = {
+          ...(config.thinkingConfig || {}),
+          includeThoughts: true,
+        };
+      }
       // Best-effort: map viib-etch `reasoning_effort` to Gemini "thinking" controls.
       // Prefer `thinkingLevel` for Gemini 3.x, and use `thinkingBudget` as fallback for numeric budgets / non-3.x models.
       // We do NOT request thought summaries (includeThoughts=false).
@@ -1420,6 +1475,9 @@ class ChatLLM {
       
       let fullContent = '';
       const toolCalls = {};
+      let fullReasoning = '';
+      let hasStartedReasoning = false;
+      let reasoningStartTime = null;
       let hasStartedResponse = false;
       let responseStartTime = null;
       let firstEventAfterRequestDone = true;
@@ -1436,17 +1494,29 @@ class ChatLLM {
         if (!candidate.content || !candidate.content.parts) continue;
         
         for (const part of candidate.content.parts) {
-          // Handle text content
+          // Handle text content (final) vs reasoning (thought) content
           if (part.text) {
-            if (!hasStartedResponse) {
-              responseStartTime = Date.now();
-              const sinceRequestDone = firstEventAfterRequestDone ? Date.now() - requestDoneTime : null;
-              await this.callHook('onResponseStart', sinceRequestDone);
-              firstEventAfterRequestDone = false;
-              hasStartedResponse = true;
+            if (part.thought) {
+              if (!hasStartedReasoning) {
+                reasoningStartTime = Date.now();
+                const sinceRequestDone = firstEventAfterRequestDone ? Date.now() - requestDoneTime : null;
+                await this.callHook('onReasoningStart', sinceRequestDone);
+                firstEventAfterRequestDone = false;
+                hasStartedReasoning = true;
+              }
+              fullReasoning += part.text;
+              await this.callHook('onReasoningData', part.text);
+            } else {
+              if (!hasStartedResponse) {
+                responseStartTime = Date.now();
+                const sinceRequestDone = firstEventAfterRequestDone ? Date.now() - requestDoneTime : null;
+                await this.callHook('onResponseStart', sinceRequestDone);
+                firstEventAfterRequestDone = false;
+                hasStartedResponse = true;
+              }
+              fullContent += part.text;
+              await this.callHook('onResponseData', part.text);
             }
-            fullContent += part.text;
-            await this.callHook('onResponseData', part.text);
           }
           
           // Handle function calls (tool calls)
@@ -1477,13 +1547,19 @@ class ChatLLM {
         const responseElapsed = Date.now() - responseStartTime;
         await this.callHook('onResponseDone', fullContent, responseElapsed);
       }
+
+      // End reasoning
+      if (hasStartedReasoning && reasoningStartTime !== null) {
+        const reasoningElapsed = Date.now() - reasoningStartTime;
+        await this.callHook('onReasoningDone', fullReasoning, reasoningElapsed);
+      }
       
       // Build structured assistant message
       const toolCallsArray = Object.values(toolCalls).filter(tc => tc.id);
       const assistantMessage = {
         role: 'assistant',
         content: fullContent || '',
-        reasoning: null,
+        reasoning: fullReasoning || null,
         tool_calls: toolCallsArray.length > 0 ? toolCallsArray : null
       };
       
