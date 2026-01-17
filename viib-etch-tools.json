@@ -184,8 +184,7 @@
         "todos": {
           "type": "array",
           "description": "List of todo items to save to the workspace",
-          "items": "{'type': 'object', 'properties': {'content': {'type': 'string', 'description': 'The description/content of the todo item'}, 'status': {'type': 'string', 'enum': ['pending', 'in_progress', 'completed', 'cancelled'], 'description': 'The current status of the todo item'}, 'id': {'type': 'string', 'description': 'Unique identifier for the todo item'}}, 'required': ['content', 'status', 'id']}",
-          "minItems": "2"
+          "items": "{'type': 'object', 'properties': {'content': {'type': 'string', 'description': 'The description/content of the todo item'}, 'status': {'type': 'string', 'enum': ['pending', 'in_progress', 'completed', 'cancelled'], 'description': 'The current status of the todo item'}, 'id': {'type': 'string', 'description': 'Unique identifier for the todo item'}}, 'required': ['content', 'status', 'id']}"
         }
       },
       "required": [

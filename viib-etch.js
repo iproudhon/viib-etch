@@ -326,6 +326,7 @@ class ChatLLM {
     this._model = null;
     this._client = null;
     this.tools = tools || null;
+    this.base_dir = undefined;
     // In-memory (non-persistent) default; if set, it will be used unless overridden per-call.
     // NOTE: This is NOT saved into ChatSession JSON.
     this.reasoning_effort = undefined;
@@ -345,6 +346,15 @@ class ChatLLM {
     };
     this._abortController = null;
     this._activeProcesses = new Map();
+  }
+
+  setBaseDir(dir) {
+    this.base_dir = dir;
+    return this;
+  }
+
+  getBaseDir() {
+    return this.base_dir;
   }
 
   // Set a default reasoning effort for this ChatLLM instance (non-persistent).
@@ -2632,9 +2642,19 @@ class ChatLLM {
       if (this._isCancelled()) {
         throw new Error('Operation cancelled');
       }
+
+      // Save current directory and change to base_dir if set
+      const originalCwd = process.cwd();
+      let changedDir = false;
       
       const toolCallStartTime = Date.now();
       try {
+        // Change to base_dir if set
+        if (this.base_dir) {
+          process.chdir(this.base_dir);
+          changedDir = true;
+        }
+        
         const args = JSON.parse(toolCall.function.arguments);
         await this.callHook('onToolCallStart', toolCall, args, null);
         const context = {
@@ -2699,6 +2719,11 @@ class ChatLLM {
         });
         const toolCallElapsed = Date.now() - toolCallStartTime;
         await this.callHook('onToolCallEnd', toolCall, { error: error.message }, toolCallElapsed);
+      } finally {
+        // Restore original directory if we changed it
+        if (changedDir) {
+          process.chdir(originalCwd);
+        }
       }
     }
     

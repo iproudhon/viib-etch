@@ -39,6 +39,42 @@ const llm2 = openChat(llm.chat.id, null, 'console');
 await llm2.send('Now add error handling');
 ```
 
+## Basic UI (mountable)
+
+`viib-etch` includes a minimal, embeddable UI in a single file: `viib-etch-ui.js`.
+
+### Mount into your own Node server
+
+```javascript
+const http = require('http');
+const { createViibEtchUI } = require('./viib-etch-ui');
+
+const ui = createViibEtchUI({
+  token: process.env.VIIB_ETCH_UI_TOKEN, // required (simple Bearer token auth)
+  // chatsDir: '/path/to/chats',
+  // modelsFile: '/path/to/viib-etch-models.json',
+});
+
+http.createServer((req, res) => {
+  const handled = ui.handler(req, res);
+  if (!handled) {
+    res.statusCode = 404;
+    res.end('not found');
+  }
+}).listen(8080, '0.0.0.0');
+```
+
+- Open the UI at `GET /ui` (requires `Authorization: Bearer <token>`).
+- The UI script is served at `GET /viib-etch-ui.js`.
+
+### Quick HTTPS helper (defaults)
+
+```javascript
+const { createViibEtchUI } = require('./viib-etch-ui');
+const ui = createViibEtchUI({ token: 'my-token' });
+ui.createHttpsServer({ port: 8443, certPath: 'zdte_cert.crt', keyPath: 'zdte_key.key' }).listen();
+```
+
 ```javascript
 const { createChat } = require('./viib-etch');
 

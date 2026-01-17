@@ -19,6 +19,9 @@ yarn.lock
 # chats directory
 chats/
 
+# token file
+.viib-etch-tokens
+
 # IDE
 .vscode/
 .idea/
