@@ -16,6 +16,7 @@
       tokenStorageKey: 'viib-etch.ui.token',
       modelStorageKey: 'viib-etch.ui.model',
       reasoningEffortStorageKey: 'viib-etch.ui.reasoningEffort',
+      directoryStorageKey: 'viib-etch.ui.directory',
       chatStorageKey: 'viib-etch.ui.chatId',
       autoScrollThresholdPx: 140,
     };
@@ -99,6 +100,20 @@
         localStorage.setItem(options.reasoningEffortStorageKey, val === 'default' ? '' : val);
       };
 
+      const getDirectory = () => {
+        const val = localStorage.getItem(options.directoryStorageKey);
+        return val ? String(val).trim() : null;
+      };
+
+      const setDirectory = (d) => {
+        const val = d ? String(d).trim() : '';
+        if (val) {
+          localStorage.setItem(options.directoryStorageKey, val);
+        } else {
+          localStorage.removeItem(options.directoryStorageKey);
+        }
+      };
+
       const authHeaders = () => {
         const t = getToken();
         return t ? { Authorization: `Bearer ${t}` } : {};
@@ -145,6 +160,26 @@
         return `<pre class="ve-pre">${escapeHtml(md || '')}</pre>`;
       };
 
+      // Parse current todos array from todo_write tool result.
+      // Supports either a top-level `todos` array or the legacy `message` that includes
+      // "Current todos:\n<json>".
+      const parseTodoWriteTodosFromResult = (resultObj) => {
+        try {
+          if (!resultObj || typeof resultObj !== 'object') return [];
+          if (Array.isArray(resultObj.todos)) return resultObj.todos;
+          const msg = resultObj.message;
+          if (typeof msg !== 'string') return [];
+          const marker = 'Current todos:\n';
+          const idx = msg.indexOf(marker);
+          if (idx === -1) return [];
+          const jsonText = msg.slice(idx + marker.length).trim();
+          const arr = JSON.parse(jsonText);
+          return Array.isArray(arr) ? arr : [];
+        } catch {
+          return [];
+        }
+      };
+
       const shouldAutoScroll = (scroller) => {
         const remaining = scroller.scrollHeight - (scroller.scrollTop + scroller.clientHeight);
         return remaining <= options.autoScrollThresholdPx;
@@ -173,7 +208,7 @@
           .ve-tab:hover .ve-tab-x{opacity:1;pointer-events:auto;}
           @media (hover: none), (pointer: coarse) { .ve-tab .ve-tab-x{opacity:1;pointer-events:auto;} }
           .ve-tab small{opacity:0.7}
-          .ve-body{flex:1;overflow:auto;padding:14px 12px 10px;scrollbar-gutter:stable;}
+          .ve-body{flex:1;overflow:auto;padding:14px 12px 10px;scrollbar-gutter:stable;position:relative;}
           .ve-footer{position:sticky;bottom:0;z-index:5;border-top:1px solid rgba(17,24,39,0.10);background:#ffffff;padding:10px 12px;display:flex;flex-direction:column;gap:8px;}
           .ve-footer-row{display:flex;gap:10px;align-items:flex-end;}
           .ve-footer-row:first-child{flex:1;}
@@ -181,18 +216,27 @@
           .ve-footer-controls{display:flex;gap:10px;align-items:center;flex:1 1 0;min-width:0;}
           .ve-footer-controls label{white-space:nowrap;font-size:12px;opacity:0.75;flex-shrink:0;}
           .ve-footer-controls .ve-select{flex:0 1 auto;min-width:0;font-size:13px;max-width:200px;}
-          .ve-textarea{flex:1;min-height:42px;max-height:140px;resize:vertical;background:#ffffff;border:1px solid rgba(17,24,39,0.14);color:#111827;border-radius:3px;padding:10px 10px;outline:none;font:16px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";}
+          .ve-textarea{flex:1;min-height:42px;max-height:140px;resize:vertical;background:#ffffff;border:1px solid rgba(17,24,39,0.14);color:#111827;border-radius:3px;padding:10px 10px;outline:none;font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";}
           .ve-select{background:#ffffff;border:1px solid rgba(17,24,39,0.14);color:#111827;border-radius:3px;padding:9px 10px;outline:none;font:16px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";}
           .ve-actions{display:flex;gap:8px;align-items:center;}
           .ve-btn{border:1px solid rgba(17,24,39,0.14);background:#f3f4f6;color:#111827;border-radius:3px;padding:9px 12px;cursor:pointer;min-width:92px;font:inherit;}
           .ve-btn.ve-primary{border-color:rgba(37,99,235,0.55);background:#eef2ff;}
           .ve-btn:disabled{opacity:0.55;cursor:not-allowed;}
           .ve-msg{margin:10px 0;display:flex;flex-direction:column;gap:6px;}
-          .ve-msg .ve-role{font-size:11px;letter-spacing:0.02em;text-transform:uppercase;opacity:0.55;}
           .ve-bubble{border-radius:3px;padding:10px 12px;border:1px solid rgba(17,24,39,0.12);background:#ffffff;}
           .ve-user .ve-bubble{background:#f9fafb;border-color:rgba(17,24,39,0.14);}
-          .ve-user .ve-bubble pre{margin:0;white-space:pre-wrap;word-break:break-word;}
+          .ve-user .ve-bubble pre{margin:0;white-space:pre-wrap;word-break:break-word;font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";}
           .ve-assistant .ve-bubble{background:#ffffff;border-color:rgba(17,24,39,0.12);}
+          /* Assistant message: single block, no extra background layer; collapses to a one-line preview */
+          .ve-assistant-block{cursor:pointer;background:transparent;padding:0;line-height:1.4;}
+          .ve-assistant-block:hover{background:transparent;}
+          .ve-assistant-block-main{min-width:0;}
+          /* Collapsed preview: single line + right-aligned ellipsis */
+          .ve-assistant-preview{display:none;position:relative;overflow:hidden;white-space:nowrap;padding-right:14px;}
+          .ve-assistant-block.collapsed .ve-assistant-preview::after{content:'…';position:absolute;right:0;top:0;}
+          .ve-assistant-full{display:block;}
+          .ve-assistant-block.collapsed .ve-assistant-full{display:none;}
+          .ve-assistant-block.collapsed .ve-assistant-preview{display:block;}
           .ve-details{border:1px solid rgba(17,24,39,0.12);border-radius:3px;background:#ffffff;overflow:hidden;}
           .ve-details summary{list-style:none;cursor:pointer;padding:10px 12px;display:flex;align-items:center;gap:8px;color:#111827;background:#f9fafb;border-bottom:1px solid rgba(17,24,39,0.08);}
           .ve-details summary::-webkit-details-marker{display:none;}
@@ -203,10 +247,14 @@
           .ve-tool{margin-top:8px}
           .ve-tool .ve-details{border-color:rgba(17,24,39,0.14);background:#ffffff;}
           .ve-tool .ve-details summary{background:#f3f4f6;}
-          .ve-tool-tabs{display:flex;gap:8px;margin:6px 0 0;}
-          .ve-tool-tab{cursor:pointer;user-select:none;padding:6px 10px;border-radius:3px;border:1px solid rgba(17,24,39,0.14);background:#ffffff;opacity:0.9;}
-          .ve-tool-tab.ve-active{opacity:1;border-color:rgba(37,99,235,0.55);background:#eef2ff;}
-          .ve-jump{position:sticky;bottom:0;margin-left:auto;margin-right:auto;width:max-content;margin-top:10px;padding:6px 10px;border-radius:3px;border:1px solid rgba(17,24,39,0.14);background:#f3f4f6;cursor:pointer;opacity:0.95}
+          /* Tool tabs: classic connected tabs + divider line to content */
+          .ve-tool-tabs{display:flex;gap:0;margin:6px 0 0;border-bottom:1px solid rgba(17,24,39,0.14);}
+          .ve-tool-tab{cursor:pointer;user-select:none;padding:6px 10px;border:1px solid rgba(17,24,39,0.14);border-bottom:none;background:#f9fafb;opacity:0.95;}
+          .ve-tool-tab + .ve-tool-tab{margin-left:-1px;}
+          .ve-tool-tab.ve-active{opacity:1;background:#ffffff;border-color:rgba(17,24,39,0.14);margin-bottom:-1px;}
+          .ve-tool-tab.ve-active{border-bottom:1px solid #ffffff;}
+          .ve-tool-tabs + [data-tabs-body]{border:1px solid rgba(17,24,39,0.14);border-top:none;padding:10px 12px;background:#ffffff;}
+          .ve-jump{padding:6px 10px;border-radius:3px;border:1px solid rgba(17,24,39,0.14);background:#f3f4f6;cursor:pointer;opacity:0.95;font-size:16px;}
           .ve-modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;z-index:50;font:13px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";}
           .ve-modal-backdrop *{font:inherit;}
           .ve-modal{width:min(720px,92vw);background:#ffffff;border:1px solid rgba(17,24,39,0.14);border-radius:3px;overflow:hidden;}
@@ -295,18 +343,26 @@
       root.appendChild(footer);
 
       let jumpBtn = null;
+      let jumpBtnWrapper = null;
       const ensureJumpBtn = () => {
         if (jumpBtn) return jumpBtn;
+        jumpBtnWrapper = document.createElement('div');
+        jumpBtnWrapper.style.cssText = 'position:sticky;bottom:10px;display:flex;justify-content:flex-end;margin-top:10px;z-index:1;';
         jumpBtn = document.createElement('button');
         jumpBtn.className = 've-jump';
-        jumpBtn.textContent = 'Jump to bottom';
+        jumpBtn.textContent = '▼';
+        jumpBtn.style.cssText = 'position:static;margin:0;';
         jumpBtn.addEventListener('click', () => scrollToBottom(body));
-        body.appendChild(jumpBtn);
+        jumpBtnWrapper.appendChild(jumpBtn);
+        body.appendChild(jumpBtnWrapper);
         return jumpBtn;
       };
       const hideJumpBtn = () => {
-        if (jumpBtn && jumpBtn.parentNode) jumpBtn.parentNode.removeChild(jumpBtn);
+        if (jumpBtnWrapper && jumpBtnWrapper.parentNode) {
+          jumpBtnWrapper.parentNode.removeChild(jumpBtnWrapper);
+        }
         jumpBtn = null;
+        jumpBtnWrapper = null;
       };
 
       let autoScrollArmed = true;
@@ -427,6 +483,7 @@
 
         // Helper: pretty JSON body
         const prettyJson = (obj) => `<pre class="ve-pre">${escapeHtml(JSON.stringify(obj, null, 2))}</pre>`;
+        // (parseTodoWriteTodosFromResult is defined at mount() scope)
 
         if (name === 'run_terminal_cmd') {
           const cmd = (parsed && parsed.command) || (typeof argsText === 'string' ? (() => {
@@ -469,6 +526,65 @@
             <div data-tabs-body="${tabId}">
               <div data-pane="cmd">${cmdHtml}</div>
               <div data-pane="diff" style="display:none">${diffHtml}</div>
+            </div>
+          `;
+        }
+
+        if (name === 'todo_write') {
+          let argsObj = null;
+          try { argsObj = JSON.parse(argsText || '{}'); } catch { argsObj = null; }
+          const resultObj = parsed;
+          const todosFromResult = parseTodoWriteTodosFromResult(resultObj);
+          const count = todosFromResult.length;
+          const tabId = `tab_${Math.random().toString(16).slice(2)}`;
+
+          const todosRows = todosFromResult
+            .map((t) => {
+              const status = escapeHtml((t && t.status) || '');
+              const id = escapeHtml((t && t.id) || '');
+              const content = escapeHtml((t && t.content) || '');
+              return `<tr>
+                <td style="padding:6px 8px;border-top:1px solid rgba(17,24,39,0.08);white-space:nowrap;">${status}</td>
+                <td style="padding:6px 8px;border-top:1px solid rgba(17,24,39,0.08);white-space:nowrap;">${id}</td>
+                <td style="padding:6px 8px;border-top:1px solid rgba(17,24,39,0.08);">${content}</td>
+              </tr>`;
+            })
+            .join('');
+
+          const todosTable = `
+            <div class="ve-kv"><span class="ve-muted">Todos</span> <span>${escapeHtml(String(count))}</span></div>
+            <div style="overflow:auto;margin-top:6px;">
+              <table style="width:auto;border-collapse:collapse;display:inline-table;">
+                <thead>
+                  <tr>
+                    <th style="text-align:left;padding:6px 8px;border-bottom:1px solid rgba(17,24,39,0.12);font-weight:600;">status</th>
+                    <th style="text-align:left;padding:6px 8px;border-bottom:1px solid rgba(17,24,39,0.12);font-weight:600;">id</th>
+                    <th style="text-align:left;padding:6px 8px;border-bottom:1px solid rgba(17,24,39,0.12);font-weight:600;">content</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${todosRows || `<tr><td colspan="3" style="padding:8px 8px;border-top:1px solid rgba(17,24,39,0.08);opacity:0.7;">(no todos)</td></tr>`}
+                </tbody>
+              </table>
+            </div>
+          `;
+
+          const argsHtml = argsObj ? prettyJson(argsObj) : `<pre class="ve-pre">${escapeHtml(argsText || '')}</pre>`;
+          const resultHtml =
+            resultObj !== null && resultObj !== undefined
+              ? (typeof resultObj === 'object' ? prettyJson(resultObj) : `<pre class="ve-pre">${escapeHtml(String(resultObj))}</pre>`)
+              : `<pre class="ve-pre">${escapeHtml(raw || '')}</pre>`;
+
+          return `
+            <div class="ve-tool-tabs" data-tabs="${tabId}">
+              <div class="ve-tool-tab ve-active" data-tab="todos">Todos</div>
+              <div class="ve-tool-tab" data-tab="args">Args</div>
+              <div class="ve-tool-tab" data-tab="result">Result</div>
+            </div>
+            <div data-tabs-body="${tabId}">
+              <div data-pane="todos">${todosTable}</div>
+              <div data-pane="args" style="display:none">${argsHtml}</div>
+              <div data-pane="result" style="display:none">${resultHtml}</div>
             </div>
           `;
         }
@@ -527,89 +643,119 @@
           if (msg.role === 'user') {
             const wrap = document.createElement('div');
             wrap.className = 've-msg ve-user';
-            wrap.innerHTML = `<div class="ve-role">user</div><div class="ve-bubble"><pre>${escapeHtml(msg.content || '')}</pre></div>`;
+            wrap.innerHTML = `<div class="ve-bubble"><pre>${escapeHtml(msg.content || '')}</pre></div>`;
             body.appendChild(wrap);
             continue;
           }
 
           if (msg.role === 'assistant') {
-            const wrap = document.createElement('div');
-            wrap.className = 've-msg ve-assistant';
-            wrap.innerHTML = `<div class="ve-role">assistant</div>`;
-
-            // Response block (expanded by default)
-            const resp = document.createElement('details');
-            resp.className = 've-details';
-            const rk = responseKey(i);
-            resp.open = !isCollapsedByUser(rk);
-            resp.innerHTML = `
-              <summary>${escapeHtml(firstLine(msg.content || '(no content)') || '(no content)')}</summary>
-              <div class="ve-details-body"><div class="ve-md" data-md="response"></div></div>
-            `;
-            resp.addEventListener('toggle', () => setCollapsedByUser(rk, !resp.open));
-            wrap.appendChild(resp);
-
-            // Reasoning block (replay default collapsed)
-            if (msg.reasoning) {
-              const reason = document.createElement('details');
-              reason.className = 've-details ve-tool';
-              const key = reasoningKey(i);
-              const defaultOpen = !replayMode; // live would manage, but replay should collapse
-              reason.open = defaultOpen && !isCollapsedByUser(key);
-              if (replayMode && !isCollapsedByUser(key)) reason.open = false;
-              reason.innerHTML = `
-                <summary>${escapeHtml(firstLine(msg.reasoning || 'Reasoning') || 'Reasoning')}</summary>
-                <div class="ve-details-body"><div class="ve-md" data-md="reasoning"></div></div>
-              `;
-              reason.addEventListener('toggle', () => setCollapsedByUser(key, !reason.open));
-              wrap.appendChild(reason);
+            // Skip assistant blocks that only have tool calls (no content, no reasoning)
+            const hasContent = msg.content && String(msg.content).trim();
+            const hasReasoning = msg.reasoning && String(msg.reasoning).trim();
+            const toolArr = assistantTools.get(i) || [];
+            const hasOnlyTools = !hasContent && !hasReasoning && toolArr.length > 0;
+            
+            if (hasOnlyTools) {
+              continue; // Skip this assistant block for now
             }
 
+            const wrap = document.createElement('div');
+            wrap.className = 've-msg ve-assistant';
+
+            // Combined assistant block (response + reasoning in one) 
+            const rk = responseKey(i);
+            const isCollapsed = isCollapsedByUser(rk);
+            const block = document.createElement('div');
+            block.className = 've-assistant-block' + (isCollapsed ? ' collapsed' : '');
+
+            const main = document.createElement('div');
+            main.className = 've-assistant-block-main';
+
+            const preview = document.createElement('div');
+            preview.className = 've-assistant-preview';
+            preview.textContent = firstLine(msg.content || msg.reasoning || '(no content)') || '(no content)';
+            main.appendChild(preview);
+
+            const full = document.createElement('div');
+            full.className = 've-assistant-full';
+
+            block.addEventListener('click', () => {
+              const collapsed = block.classList.toggle('collapsed');
+              setCollapsedByUser(rk, collapsed);
+            });
+            
+            const content = document.createElement('div');
+            content.className = 've-assistant-block-content';
+            
+            // Response content
+            if (msg.content) {
+              const respDiv = document.createElement('div');
+              respDiv.className = 've-md';
+              respDiv.setAttribute('data-md', 'response');
+              content.appendChild(respDiv);
+            }
+            
+            // Reasoning content
+            if (msg.reasoning) {
+              if (msg.content) {
+                const sep = document.createElement('div');
+                sep.style.cssText = 'margin:8px 0;border-top:1px solid rgba(17,24,39,0.08);padding-top:8px;';
+                content.appendChild(sep);
+              }
+              const reasonDiv = document.createElement('div');
+              reasonDiv.className = 've-md';
+              reasonDiv.setAttribute('data-md', 'reasoning');
+              content.appendChild(reasonDiv);
+            }
+
+            full.appendChild(content);
+            main.appendChild(full);
+            block.appendChild(main);
+            wrap.appendChild(block);
+
             // Tool calls + results (replay collapsed)
-            const toolArr = assistantTools.get(i) || [];
             if (toolArr.length > 0) {
               for (const t of toolArr) {
                 const toolCall = t.toolCall;
                 const toolMsg = t.toolMsg;
                 const name = toolCall?.function?.name || toolMsg?.name || '(tool)';
                 const tid = toolCall?.id ? String(toolCall.id) : '';
+                let summaryTitle = null;
+                if (name === 'todo_write') {
+                  let ok = false;
+                  // Title requested: "Todo: success|failure" (no count)
+                  try {
+                    const resObj = toolMsg && toolMsg.content ? JSON.parse(toolMsg.content) : null;
+                    ok = !!(resObj && resObj.success === true);
+                  } catch {
+                    ok = false;
+                  }
+                  summaryTitle = `Todo: ${ok ? 'success' : 'failure'}`;
+                }
                 const toolWrap = document.createElement('div');
                 toolWrap.className = 've-tool';
                 const det = document.createElement('details');
                 det.className = 've-details';
                 det.open = false;
                 det.innerHTML = `
-                  <summary>${escapeHtml(name)} <span class="ve-muted">${escapeHtml(tid)}</span></summary>
+                  <summary>${summaryTitle ? escapeHtml(summaryTitle) : `${escapeHtml(name)} <span class="ve-muted">${escapeHtml(tid)}</span>`}</summary>
                   <div class="ve-details-body"><div class="ve-tool-body">Loading…</div></div>
                 `;
                 toolWrap.appendChild(det);
                 wrap.appendChild(toolWrap);
-                body.appendChild(wrap);
-
-                // Lazy render body only when opened
-                const fill = async () => {
-                  const bodyEl = det.querySelector('.ve-tool-body');
-                  if (!bodyEl || bodyEl.getAttribute('data-filled') === '1') return;
-                  bodyEl.textContent = 'Rendering…';
-                  const html = await renderToolBody(chat, toolCall, toolMsg);
-                  bodyEl.innerHTML = html;
-                  bodyEl.setAttribute('data-filled', '1');
-                  wireToolTabs(bodyEl);
-                };
-                det.addEventListener('toggle', () => { if (det.open) fill(); });
               }
             }
 
             body.appendChild(wrap);
 
             // Render markdown (lazy-ish but minimal)
-            const respMd = resp.querySelector('[data-md="response"]');
-            if (respMd) {
+            const respMd = wrap.querySelector('[data-md="response"]');
+            if (respMd && msg.content) {
               const html = (await renderMarkdownViaServer(msg.content)) || renderMarkdownFallback(msg.content);
               respMd.innerHTML = html;
             }
             const reasonMd = wrap.querySelector('[data-md="reasoning"]');
-            if (reasonMd) {
+            if (reasonMd && msg.reasoning) {
               const html = (await renderMarkdownViaServer(msg.reasoning)) || renderMarkdownFallback(msg.reasoning);
               reasonMd.innerHTML = html;
             }
@@ -634,27 +780,45 @@
         // Create a new assistant block in the stream
         const wrap = document.createElement('div');
         wrap.className = 've-msg ve-assistant';
-        wrap.innerHTML = `<div class="ve-role">assistant</div>`;
 
-        const respDetails = document.createElement('details');
-        respDetails.className = 've-details';
-        respDetails.open = true;
-        respDetails.innerHTML = `
-          <summary>(streaming…)</summary>
-          <div class="ve-details-body"><div class="ve-md" data-md="response"></div></div>
-        `;
-        wrap.appendChild(respDetails);
+        const block = document.createElement('div');
+        block.className = 've-assistant-block';
+
+        const main = document.createElement('div');
+        main.className = 've-assistant-block-main';
+
+        const preview = document.createElement('div');
+        preview.className = 've-assistant-preview';
+        preview.textContent = '(streaming…)';
+        main.appendChild(preview);
+
+        const full = document.createElement('div');
+        full.className = 've-assistant-full';
+
+        const content = document.createElement('div');
+        content.className = 've-assistant-block-content';
+        const respDiv = document.createElement('div');
+        respDiv.className = 've-md';
+        respDiv.setAttribute('data-md', 'response');
+        content.appendChild(respDiv);
+
+        full.appendChild(content);
+        main.appendChild(full);
+        block.appendChild(main);
+        wrap.appendChild(block);
 
         const toolsWrapEl = document.createElement('div');
         wrap.appendChild(toolsWrapEl);
 
         body.appendChild(wrap);
 
-        const respMdEl = respDetails.querySelector('[data-md="response"]');
+        const respMdEl = respDiv;
 
         c = {
           rootEl: wrap,
-          respDetails,
+          respDetails: block,
+          respHeader: null,
+          respPreviewEl: preview,
           respMdEl,
           respText: '',
           reasonDetails: null,
@@ -666,8 +830,11 @@
         };
 
         // Track user collapse/expand for live blocks
-        respDetails.addEventListener('toggle', () => {
-          // no-op for now; keep state via DOM
+        block.addEventListener('click', () => {
+          const wasCollapsed = block.classList.contains('collapsed');
+          block.classList.toggle('collapsed');
+          // If user explicitly opened while running, treat as pinned (don't auto-collapse).
+          if (state.live.running && wasCollapsed) c.reasoningPinnedOpen = true;
         });
         state.live.cycles.set(cid, c);
         return c;
@@ -678,23 +845,19 @@
         if (!c) return null;
         if (c.reasonDetails && c.reasonMdEl) return c;
 
-        const reasonDetails = document.createElement('details');
-        reasonDetails.className = 've-details ve-tool';
-        reasonDetails.open = true; // live: expanded while running
-        reasonDetails.innerHTML = `
-          <summary>Reasoning</summary>
-          <div class="ve-details-body"><div class="ve-md" data-md="reasoning"></div></div>
-        `;
-        // Insert right after response details
-        c.respDetails.insertAdjacentElement('afterend', reasonDetails);
-
-        c.reasonDetails = reasonDetails;
-        c.reasonMdEl = reasonDetails.querySelector('[data-md="reasoning"]');
-
-        reasonDetails.addEventListener('toggle', () => {
-          // If user explicitly opened while running, treat as pinned (don’t auto-collapse).
-          if (state.live.running && reasonDetails.open) c.reasoningPinnedOpen = true;
-        });
+        // Add reasoning to the same block content
+        const content = c.respDetails.querySelector('.ve-assistant-block-content');
+        if (content && !c.reasonMdEl) {
+          const sep = document.createElement('div');
+          sep.style.cssText = 'margin:8px 0;border-top:1px solid rgba(17,24,39,0.08);padding-top:8px;';
+          const reasonDiv = document.createElement('div');
+          reasonDiv.className = 've-md';
+          reasonDiv.setAttribute('data-md', 'reasoning');
+          content.appendChild(sep);
+          content.appendChild(reasonDiv);
+          c.reasonMdEl = reasonDiv;
+          c.reasonDetails = c.respDetails; // Use same block
+        }
 
         return c;
       };
@@ -725,7 +888,7 @@
       const liveAppendUserMessage = (content) => {
         const wrap = document.createElement('div');
         wrap.className = 've-msg ve-user';
-        wrap.innerHTML = `<div class="ve-role">user</div><div class="ve-bubble"><pre>${escapeHtml(content || '')}</pre></div>`;
+        wrap.innerHTML = `<div class="ve-bubble"><pre>${escapeHtml(content || '')}</pre></div>`;
         body.appendChild(wrap);
         liveAutoScrollIfArmed();
       };
@@ -904,7 +1067,7 @@
             const data = JSON.parse(e.data || '{}');
             const c = liveEnsureReasoningPanel(data.cycle_id || state.live.currentCycleId);
             if (!c) return;
-            if (c.reasonDetails) c.reasonDetails.open = true;
+            if (c.respDetails) c.respDetails.classList.remove('collapsed');
             liveAutoScrollIfArmed();
           } catch {}
         });
@@ -914,11 +1077,11 @@
             const c = liveEnsureReasoningPanel(data.cycle_id || state.live.currentCycleId);
             if (!c) return;
             c.reasonText += String(data.delta || '');
-            if (c.reasonDetails) {
-              c.reasonDetails.open = true;
-              const title = firstLine(c.reasonText || 'Reasoning') || 'Reasoning';
-              const sum = c.reasonDetails.querySelector('summary');
-              if (sum) sum.textContent = title;
+            if (c.respDetails) {
+              c.respDetails.classList.remove('collapsed');
+            }
+            if (c.respPreviewEl) {
+              c.respPreviewEl.textContent = firstLine(c.respText || c.reasonText || '…') || '…';
             }
             scheduleMarkdownRender(`reason:${data.cycle_id}`, c.reasonText, c.reasonMdEl);
           } catch {}
@@ -937,7 +1100,7 @@
             const data = JSON.parse(e.data || '{}');
             const c = liveEnsureAssistantCycle(data.cycle_id || state.live.currentCycleId);
             if (!c) return;
-            c.respDetails.open = true;
+            c.respDetails.classList.remove('collapsed');
             liveAutoScrollIfArmed();
           } catch {}
         });
@@ -947,9 +1110,9 @@
             const c = liveEnsureAssistantCycle(data.cycle_id || state.live.currentCycleId);
             if (!c) return;
             c.respText += String(data.delta || '');
-            const sum = c.respDetails.querySelector('summary');
-            const title = firstLine(c.respText || '(streaming…)') || '(streaming…)';
-            if (sum) sum.textContent = title;
+            if (c.respPreviewEl) {
+              c.respPreviewEl.textContent = firstLine(c.respText || c.reasonText || '(streaming…)') || '(streaming…)';
+            }
             scheduleMarkdownRender(`resp:${data.cycle_id}`, c.respText, c.respMdEl);
           } catch {}
         });
@@ -970,7 +1133,11 @@
             tb.detailsEl.open = true;
             const sum = tb.detailsEl.querySelector('summary');
             if (sum) {
-              sum.innerHTML = `${escapeHtml(tb.name)} <span class="ve-muted">${escapeHtml(tb.toolCallId)}</span> <span class="ve-muted">Running</span>`;
+              if (tb.name === 'todo_write') {
+                sum.textContent = `Todo: running`;
+              } else {
+                sum.innerHTML = `${escapeHtml(tb.name)} <span class="ve-muted">${escapeHtml(tb.toolCallId)}</span> <span class="ve-muted">Running</span>`;
+              }
             }
             liveAutoScrollIfArmed();
           } catch {}
@@ -1002,7 +1169,12 @@
             tb.running = false;
             const sum = tb.detailsEl.querySelector('summary');
             if (sum) {
-              sum.innerHTML = `${escapeHtml(tb.name)} <span class="ve-muted">${escapeHtml(tb.toolCallId)}</span> <span class="ve-muted">Ran</span>`;
+              if (tb.name === 'todo_write') {
+                const ok = !!(tb.result && typeof tb.result === 'object' && tb.result.success === true);
+                sum.textContent = `Todo: ${ok ? 'success' : 'failure'}`;
+              } else {
+                sum.innerHTML = `${escapeHtml(tb.name)} <span class="ve-muted">${escapeHtml(tb.toolCallId)}</span> <span class="ve-muted">Ran</span>`;
+              }
             }
             // Collapse once done unless user left it open intentionally
             if (!tb.openedByUser) tb.detailsEl.open = false;
@@ -1012,12 +1184,6 @@
         ev.addEventListener('run.done', async () => {
           state.live.running = false;
           setRunning(false);
-          // Collapse reasoning blocks unless user pinned open
-          for (const c of state.live.cycles.values()) {
-            if (!c.reasoningPinnedOpen) {
-              if (c.reasonDetails) c.reasonDetails.open = false;
-            }
-          }
           // Refresh tabs so title changes show up
           refreshChats().catch(() => {});
         });
@@ -1032,9 +1198,13 @@
         if (!String(text || '').trim() || !state.chatId) return;
         const model_name = getSelectedModel();
         const reasoning_effort = getSelectedReasoningEffort();
+        const directory = getDirectory();
         const params = { message: text, model_name };
         if (reasoning_effort && reasoning_effort !== 'default') {
           params.reasoning_effort = reasoning_effort;
+        }
+        if (directory) {
+          params.directory = directory;
         }
         setRunning(true);
         ensureSSE();
@@ -1085,6 +1255,11 @@
               <input class="ve-input" data-apibase="1" placeholder="/api" />
               <div class="ve-muted" style="font-size:12px">If you mount under a prefix, set this accordingly (e.g. /my/api).</div>
             </div>
+            <div class="ve-field">
+              <label>Directory</label>
+              <input class="ve-input" data-directory="1" placeholder="(optional) working directory for tool execution" />
+              <div class="ve-muted" style="font-size:12px">Set the base directory for tool execution. Leave empty to use current directory.</div>
+            </div>
           </main>
         `;
         backdrop.appendChild(modal);
@@ -1092,8 +1267,10 @@
 
         const tokenInput = modal.querySelector('[data-token="1"]');
         const apiBaseInput = modal.querySelector('[data-apibase="1"]');
+        const directoryInput = modal.querySelector('[data-directory="1"]');
         if (tokenInput) tokenInput.value = getToken();
         if (apiBaseInput) apiBaseInput.value = options.apiBase;
+        if (directoryInput) directoryInput.value = getDirectory() || '';
 
         const saveAndClose = () => {
           // Save values before closing, in case change events didn't fire
@@ -1111,6 +1288,13 @@
               refreshModels().catch(() => {});
               refreshChats().catch(() => {});
               ensureSSE();
+            }
+          }
+          if (directoryInput) {
+            const newDir = String(directoryInput.value || '').trim();
+            const currentDir = getDirectory();
+            if (newDir !== (currentDir || '')) {
+              setDirectory(newDir || null);
             }
           }
           try { document.body.removeChild(backdrop); } catch {}
@@ -1131,6 +1315,9 @@
           refreshModels().catch(() => {});
           refreshChats().catch(() => {});
           ensureSSE();
+        });
+        directoryInput.addEventListener('change', () => {
+          setDirectory(directoryInput.value || null);
         });
       };
 
@@ -1603,6 +1790,11 @@
               ? body.reasoning_effort.trim()
               : undefined;
 
+            // Get directory from request body if provided
+            const directory = (typeof body.directory === 'string' && body.directory.trim())
+              ? body.directory.trim()
+              : undefined;
+
             // IMPORTANT: use openChat() so default tool definitions are loaded from model config
             // (ChatLLM.newChatSession does this, but new ChatLLM(...) does not).
             const llm = (typeof viib.openChat === 'function')
@@ -1612,6 +1804,11 @@
             // Set reasoning effort if provided
             if (reasoning_effort !== undefined && reasoning_effort !== null && reasoning_effort !== 'default') {
               llm.setReasoningEffort(reasoning_effort);
+            }
+            
+            // Set base directory if provided
+            if (directory !== undefined && directory !== null && directory !== '') {
+              llm.setBaseDir(directory);
             }
             
             runByChatId.set(String(chatId), { llm, running: true, startedAt: Date.now() });
