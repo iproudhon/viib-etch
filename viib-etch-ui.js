@@ -552,8 +552,7 @@
             .join('');
 
           const todosTable = `
-            <div class="ve-kv"><span class="ve-muted">Todos</span> <span>${escapeHtml(String(count))}</span></div>
-            <div style="overflow:auto;margin-top:6px;">
+            <div style="overflow:auto;">
               <table style="width:auto;border-collapse:collapse;display:inline-table;">
                 <thead>
                   <tr>
@@ -743,6 +742,22 @@
                 `;
                 toolWrap.appendChild(det);
                 wrap.appendChild(toolWrap);
+
+                // Lazy render body only when opened (replay)
+                const fill = async () => {
+                  const bodyEl = det.querySelector('.ve-tool-body');
+                  if (!bodyEl || bodyEl.getAttribute('data-filled') === '1') return;
+                  bodyEl.textContent = 'Rendering…';
+                  try {
+                    const html = await renderToolBody(chat, toolCall, toolMsg);
+                    bodyEl.innerHTML = html;
+                    bodyEl.setAttribute('data-filled', '1');
+                    wireToolTabs(bodyEl);
+                  } catch (err) {
+                    bodyEl.innerHTML = `<pre class="ve-pre">${escapeHtml(String(err && err.message ? err.message : err))}</pre>`;
+                  }
+                };
+                det.addEventListener('toggle', () => { if (det.open) fill(); });
               }
             }
 
