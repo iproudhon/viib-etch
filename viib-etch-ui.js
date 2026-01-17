@@ -1588,7 +1588,12 @@
             const model_name = (typeof body.model_name === 'string' && body.model_name.trim())
               ? body.model_name.trim()
               : chat.model_name;
+            
             if (!chat.model_name && model_name) {
+              chat.model_name = model_name;
+              chat.save();
+            } else if (model_name && model_name !== chat.model_name) {
+              // Update model if it changed
               chat.model_name = model_name;
               chat.save();
             }
