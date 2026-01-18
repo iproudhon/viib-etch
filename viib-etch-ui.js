@@ -278,6 +278,10 @@
       const footer = document.createElement('div');
       footer.className = 've-footer';
       
+      const isMobile = () =>
+        typeof navigator !== 'undefined' &&
+        /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent || '');
+
       // Row 1: Textarea
       const row1 = document.createElement('div');
       row1.className = 've-footer-row';
@@ -1388,14 +1392,17 @@
       });
       ta.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') {
+          // On mobile (iOS/Android/etc.), never treat Enter as send; always insert newline.
+          if (isMobile()) return;
+
           if (e.shiftKey || e.ctrlKey || e.metaKey) {
             // Shift+Enter, Ctrl+Enter, or Cmd+Enter: allow newline (default behavior)
             return;
-          } else {
-            // Enter alone: send message
-            e.preventDefault();
-            if (!state.running) sendMessage();
           }
+
+          // Desktop: Enter alone sends the message.
+          e.preventDefault();
+          if (!state.running) sendMessage();
         }
       });
 
