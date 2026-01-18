@@ -204,7 +204,7 @@
           .ve-footer-controls label{white-space:nowrap;font-size:12px;opacity:0.75;flex-shrink:0;}
           .ve-footer-controls .ve-select{flex:0 1 auto;min-width:0;font-size:13px;max-width:200px;}
           /* Use 16px font to avoid iOS Safari zooming input on focus */
-          .ve-textarea{flex:1;min-height:42px;max-height:140px;resize:vertical;background:#ffffff;border:1px solid rgba(17,24,39,0.14);color:#111827;border-radius:3px;padding:10px 10px;outline:none;font:16px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";}
+          .ve-textarea{flex:1;min-height:42px;max-height:50vh;resize:none;background:#ffffff;border:1px solid rgba(17,24,39,0.14);color:#111827;border-radius:3px;padding:10px 10px;outline:none;font:16px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";overflow-y:auto;}
           .ve-select{background:#ffffff;border:1px solid rgba(17,24,39,0.14);color:#111827;border-radius:3px;padding:9px 10px;outline:none;font:16px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";}
           .ve-actions{display:flex;gap:8px;align-items:center;}
           .ve-btn{border:1px solid rgba(17,24,39,0.14);background:#f3f4f6;color:#111827;border-radius:3px;padding:9px 12px;cursor:pointer;min-width:92px;font:inherit;}
@@ -1286,6 +1286,7 @@
         setRunning(true);
         ensureSSE();
         ta.value = '';
+        autoResizeTextarea();
         // Optimistically show the user message immediately during live.
         state.live.pendingUserEcho = String(text);
         liveAppendUserMessage(String(text));
@@ -1390,6 +1391,19 @@
         if (state.running) cancelRun();
         else sendMessage();
       });
+
+      const autoResizeTextarea = () => {
+        // Reset height to measure scrollHeight from the intrinsic content size
+        ta.style.height = 'auto';
+        const maxPx = Math.floor(window.innerHeight * 0.5);
+        const next = Math.min(ta.scrollHeight, maxPx);
+        ta.style.height = next + 'px';
+      };
+
+      ta.addEventListener('input', autoResizeTextarea);
+      // Initialize height
+      autoResizeTextarea();
+
       ta.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') {
           // On mobile (iOS/Android/etc.), never treat Enter as send; always insert newline.
