@@ -16,7 +16,6 @@
       tokenStorageKey: 'viib-etch.ui.token',
       modelStorageKey: 'viib-etch.ui.model',
       reasoningEffortStorageKey: 'viib-etch.ui.reasoningEffort',
-      directoryStorageKey: 'viib-etch.ui.directory',
       chatStorageKey: 'viib-etch.ui.chatId',
       autoScrollThresholdPx: 140,
     };
@@ -98,20 +97,6 @@
         const val = String(e || 'default');
         state.selectedReasoningEffort = val === 'default' ? null : val;
         localStorage.setItem(options.reasoningEffortStorageKey, val === 'default' ? '' : val);
-      };
-
-      const getDirectory = () => {
-        const val = localStorage.getItem(options.directoryStorageKey);
-        return val ? String(val).trim() : null;
-      };
-
-      const setDirectory = (d) => {
-        const val = d ? String(d).trim() : '';
-        if (val) {
-          localStorage.setItem(options.directoryStorageKey, val);
-        } else {
-          localStorage.removeItem(options.directoryStorageKey);
-        }
       };
 
       const authHeaders = () => {
@@ -200,6 +185,8 @@
           .ve-iconbtn:hover{background:#e5e7eb;}
           .ve-iconbtn.ve-config{border:none;background:transparent;padding:6px 8px;}
           .ve-iconbtn.ve-config:hover{background:rgba(17,24,39,0.05);}
+          .ve-iconbtn.ve-folder{border:none;background:transparent;padding:6px 8px;}
+          .ve-iconbtn.ve-folder:hover{background:rgba(17,24,39,0.05);}
           .ve-tabs{flex:1;display:flex;gap:8px;overflow:auto;scrollbar-width:none;}
           .ve-tabs::-webkit-scrollbar{display:none;}
           .ve-tab{flex:0 0 auto;max-width:280px;display:flex;align-items:center;gap:8px;padding:6px 26px 6px 10px;border-radius:3px;border:1px solid rgba(17,24,39,0.12);background:#f9fafb;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:relative;}
@@ -315,11 +302,18 @@
       reasoningLabel.textContent = 'Reasoning';
       const reasoningSel = document.createElement('select');
       reasoningSel.className = 've-select';
+
+      const btnFolder = document.createElement('button');
+      btnFolder.className = 've-iconbtn ve-folder';
+      btnFolder.textContent = '📁';
+      btnFolder.title = 'Set base directory for this chat';
+      btnFolder.setAttribute('aria-label', 'Set base directory for this chat');
       
       controls.appendChild(modelLabel);
       controls.appendChild(modelSel);
       controls.appendChild(reasoningLabel);
       controls.appendChild(reasoningSel);
+      controls.appendChild(btnFolder);
       
       // Right side: send button (fixed, right-aligned)
       const actions = document.createElement('div');
@@ -1027,14 +1021,81 @@
       };
 
       const createNewChat = async () => {
-        const model_name = getSelectedModel();
+        // New chat should inherit model + base_dir from the currently selected chat, if any.
+        const model_name = (state.chat && state.chat.model_name) ? String(state.chat.model_name) : getSelectedModel();
+        const base_dir = (state.chat && state.chat.base_dir) ? String(state.chat.base_dir) : null;
         const res = await apiFetch('/chat', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ model_name }),
+          body: JSON.stringify(Object.assign({ model_name }, base_dir ? { base_dir } : {})),
         });
         await refreshChats();
         if (res && res.id) await openChatId(res.id);
+      };
+      const openBaseDirModal = () => {
+        if (!state.chatId) {
+          alert('No chat selected.');
+          return;
+        }
+        const backdrop = document.createElement('div');
+        backdrop.className = 've-modal-backdrop';
+        const modal = document.createElement('div');
+        modal.className = 've-modal';
+        modal.innerHTML = `
+          <header>
+            <div>Base Directory</div>
+            <button class="ve-iconbtn" data-close="1">Close</button>
+          </header>
+          <main>
+            <div class="ve-field">
+              <label>Directory (optional)</label>
+              <input class="ve-input" data-basedir="1" placeholder="e.g. /data/sjung/src/project" />
+              <div class="ve-muted" style="font-size:12px">Used as the working directory for tool execution in this chat. Leave empty to unset.</div>
+            </div>
+          </main>
+        `;
+        backdrop.appendChild(modal);
+        document.body.appendChild(backdrop);
+
+        const baseDirInput = modal.querySelector('[data-basedir="1"]');
+        if (baseDirInput) baseDirInput.value = (state.chat && state.chat.base_dir) ? String(state.chat.base_dir) : '';
+
+        const close = () => {
+          try { document.body.removeChild(backdrop); } catch {}
+        };
+
+        const save = async () => {
+          const val = baseDirInput ? String(baseDirInput.value || '').trim() : '';
+          const payload = { base_dir: val ? val : null };
+          await apiFetch(`/chat/${encodeURIComponent(state.chatId)}/base_dir`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          // Refresh current chat (so state.chat.base_dir is updated for New Chat inheritance)
+          state.chat = await apiFetch(`/chat/${encodeURIComponent(state.chatId)}`);
+          close();
+        };
+
+        backdrop.addEventListener('click', (e) => {
+          if (e.target === backdrop) close();
+        });
+        modal.querySelector('[data-close="1"]').addEventListener('click', close);
+
+        // Save on Enter, allow multiline not needed
+        baseDirInput.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            save().catch((err) => alert(String(err && err.message ? err.message : err)));
+          }
+        });
+        // Add a save button-like behavior on blur? keep explicit: click outside just closes.
+        const btnSave = document.createElement('button');
+        btnSave.className = 've-btn ve-primary';
+        btnSave.textContent = 'Save';
+        btnSave.style.marginTop = '10px';
+        btnSave.addEventListener('click', () => save().catch((err) => alert(String(err && err.message ? err.message : err))));
+        modal.querySelector('main').appendChild(btnSave);
       };
 
       const closeSSE = () => {
@@ -1213,13 +1274,9 @@
         if (!String(text || '').trim() || !state.chatId) return;
         const model_name = getSelectedModel();
         const reasoning_effort = getSelectedReasoningEffort();
-        const directory = getDirectory();
         const params = { message: text, model_name };
         if (reasoning_effort && reasoning_effort !== 'default') {
           params.reasoning_effort = reasoning_effort;
-        }
-        if (directory) {
-          params.directory = directory;
         }
         setRunning(true);
         ensureSSE();
@@ -1270,11 +1327,6 @@
               <input class="ve-input" data-apibase="1" placeholder="/api" />
               <div class="ve-muted" style="font-size:12px">If you mount under a prefix, set this accordingly (e.g. /my/api).</div>
             </div>
-            <div class="ve-field">
-              <label>Directory</label>
-              <input class="ve-input" data-directory="1" placeholder="(optional) working directory for tool execution" />
-              <div class="ve-muted" style="font-size:12px">Set the base directory for tool execution. Leave empty to use current directory.</div>
-            </div>
           </main>
         `;
         backdrop.appendChild(modal);
@@ -1282,10 +1334,8 @@
 
         const tokenInput = modal.querySelector('[data-token="1"]');
         const apiBaseInput = modal.querySelector('[data-apibase="1"]');
-        const directoryInput = modal.querySelector('[data-directory="1"]');
         if (tokenInput) tokenInput.value = getToken();
         if (apiBaseInput) apiBaseInput.value = options.apiBase;
-        if (directoryInput) directoryInput.value = getDirectory() || '';
 
         const saveAndClose = () => {
           // Save values before closing, in case change events didn't fire
@@ -1303,13 +1353,6 @@
               refreshModels().catch(() => {});
               refreshChats().catch(() => {});
               ensureSSE();
-            }
-          }
-          if (directoryInput) {
-            const newDir = String(directoryInput.value || '').trim();
-            const currentDir = getDirectory();
-            if (newDir !== (currentDir || '')) {
-              setDirectory(newDir || null);
             }
           }
           try { document.body.removeChild(backdrop); } catch {}
@@ -1331,15 +1374,13 @@
           refreshChats().catch(() => {});
           ensureSSE();
         });
-        directoryInput.addEventListener('change', () => {
-          setDirectory(directoryInput.value || null);
-        });
       };
 
       btnConfig.addEventListener('click', openConfigModal);
       btnNew.addEventListener('click', () => createNewChat().catch((e) => alert(String(e.message || e))));
       modelSel.addEventListener('change', () => setSelectedModel(modelSel.value));
       reasoningSel.addEventListener('change', () => setSelectedReasoningEffort(reasoningSel.value));
+      btnFolder.addEventListener('click', openBaseDirModal);
       btnAction.addEventListener('click', () => {
         if (state.running) cancelRun();
         else sendMessage();
@@ -1655,6 +1696,11 @@
               return true;
             }
             const llm = ChatLLM.newChatSession(model_name, true, null, {});
+            // Optional: set persistent base_dir on the new chat
+            const base_dir = (typeof body.base_dir === 'string' && body.base_dir.trim()) ? body.base_dir.trim() : null;
+            if (base_dir) {
+              try { llm.setBaseDir(base_dir); } catch {}
+            }
             json(res, 200, { id: llm.chat.id });
           } catch (e) {
             json(res, 500, { error: e.message || String(e) });
@@ -1760,6 +1806,36 @@
           return true;
         }
 
+        // POST /api/chat/:id/base_dir { base_dir?: string|null }
+        const baseDirMatch = pathname.match(
+          new RegExp('^' + apiBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/chat/([^/]+)/base_dir$')
+        );
+        if (req.method === 'POST' && baseDirMatch) {
+          const chatId = decodeURIComponent(baseDirMatch[1]);
+          try {
+            const body = await readJson(req);
+            const chat = ChatSession.load(chatId);
+            if (!chat) {
+              json(res, 404, { error: 'not found' });
+              return true;
+            }
+            const base_dir =
+              (typeof body.base_dir === 'string' && body.base_dir.trim())
+                ? body.base_dir.trim()
+                : null;
+            if (typeof chat.setBaseDir === 'function') {
+              chat.setBaseDir(base_dir);
+            } else {
+              chat.base_dir = base_dir;
+              chat.save();
+            }
+            json(res, 200, { success: true, base_dir: chat.base_dir });
+          } catch (e) {
+            json(res, 500, { error: e.message || String(e) });
+          }
+          return true;
+        }
+
         // POST /api/chat/:id/send { message, model_name? }
         const sendMatch = pathname.match(
           new RegExp('^' + apiBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/chat/([^/]+)/send$')
@@ -1805,11 +1881,6 @@
               ? body.reasoning_effort.trim()
               : undefined;
 
-            // Get directory from request body if provided
-            const directory = (typeof body.directory === 'string' && body.directory.trim())
-              ? body.directory.trim()
-              : undefined;
-
             // IMPORTANT: use openChat() so default tool definitions are loaded from model config
             // (ChatLLM.newChatSession does this, but new ChatLLM(...) does not).
             const llm = (typeof viib.openChat === 'function')
@@ -1819,11 +1890,6 @@
             // Set reasoning effort if provided
             if (reasoning_effort !== undefined && reasoning_effort !== null && reasoning_effort !== 'default') {
               llm.setReasoningEffort(reasoning_effort);
-            }
-            
-            // Set base directory if provided
-            if (directory !== undefined && directory !== null && directory !== '') {
-              llm.setBaseDir(directory);
             }
             
             runByChatId.set(String(chatId), { llm, running: true, startedAt: Date.now() });

@@ -137,6 +137,9 @@ class ChatSession {
     this.model_name = data.model_name || null;
     this.messages = data.messages || [];
     this.data = data.data || {};
+    // Persistent base directory for tool execution (optional).
+    // If set, tool execution will chdir() into this directory for the duration of the tool call.
+    this.base_dir = (data.base_dir === null || data.base_dir === undefined) ? null : String(data.base_dir);
     this.persistent = data.persistent === true;
     this._model = null;
   }
@@ -246,9 +249,21 @@ class ChatSession {
       title: this.title,
       model_name: this.model_name,
       messages: this.messages,
-      data: this.data
+      data: this.data,
+      base_dir: this.base_dir
     };
     fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+  }
+
+  setBaseDir(dir) {
+    const v = (dir === null || dir === undefined) ? null : String(dir).trim();
+    this.base_dir = v ? v : null;
+    this.save();
+    return this;
+  }
+
+  getBaseDir() {
+    return this.base_dir;
   }
 
   addMessage(message) {
@@ -326,7 +341,6 @@ class ChatLLM {
     this._model = null;
     this._client = null;
     this.tools = tools || null;
-    this.base_dir = undefined;
     // In-memory (non-persistent) default; if set, it will be used unless overridden per-call.
     // NOTE: This is NOT saved into ChatSession JSON.
     this.reasoning_effort = undefined;
@@ -349,12 +363,20 @@ class ChatLLM {
   }
 
   setBaseDir(dir) {
-    this.base_dir = dir;
+    // Back-compat: store on ChatSession (persistent)
+    if (this.chat && typeof this.chat.setBaseDir === 'function') {
+      this.chat.setBaseDir(dir);
+    } else if (this.chat) {
+      const v = (dir === null || dir === undefined) ? null : String(dir).trim();
+      this.chat.base_dir = v ? v : null;
+      try { this.chat.save(); } catch {}
+    }
     return this;
   }
 
   getBaseDir() {
-    return this.base_dir;
+    if (this.chat && typeof this.chat.getBaseDir === 'function') return this.chat.getBaseDir();
+    return this.chat ? this.chat.base_dir : null;
   }
 
   // Set a default reasoning effort for this ChatLLM instance (non-persistent).
@@ -2649,9 +2671,10 @@ class ChatLLM {
       
       const toolCallStartTime = Date.now();
       try {
-        // Change to base_dir if set
-        if (this.base_dir) {
-          process.chdir(this.base_dir);
+        // Change to base_dir if set (stored on ChatSession)
+        const baseDir = (this.chat && (typeof this.chat.getBaseDir === 'function' ? this.chat.getBaseDir() : this.chat.base_dir)) || null;
+        if (baseDir) {
+          process.chdir(baseDir);
           changedDir = true;
         }
         
