@@ -57,6 +57,9 @@
         token: null,
         running: false,
         sse: null,
+        thinkingNode: null,
+        thinkingTimerId: null,
+        thinkingStartedAt: null,
         live: {
           running: false,
           currentCycleId: null,
@@ -172,6 +175,66 @@
 
       const scrollToBottom = (scroller) => {
         scroller.scrollTop = scroller.scrollHeight;
+      };
+
+      const ensureThinkingNode = () => {
+        if (state.thinkingNode && state.thinkingNode.parentNode) return state.thinkingNode;
+        const wrap = document.createElement('div');
+        wrap.style.margin = '10px 0';
+        const span = document.createElement('span');
+        span.className = 've-muted';
+        wrap.appendChild(span);
+        body.appendChild(wrap);
+        state.thinkingNode = wrap;
+        // Always ensure thinking node is last in the body
+        if (wrap.parentNode === body && body.lastChild !== wrap) {
+          body.appendChild(wrap);
+        }
+        return wrap;
+      };
+
+      const removeThinkingNode = () => {
+        if (state.thinkingNode && state.thinkingNode.parentNode) {
+          state.thinkingNode.parentNode.removeChild(state.thinkingNode);
+        }
+        state.thinkingNode = null;
+      };
+
+      const clearThinkingTimer = () => {
+        if (state.thinkingTimerId !== null) {
+          clearInterval(state.thinkingTimerId);
+          state.thinkingTimerId = null;
+        }
+      };
+
+      const stopThinking = () => {
+        clearThinkingTimer();
+        removeThinkingNode();
+        state.thinkingStartedAt = null;
+      };
+
+      const formatElapsed = (ms) => {
+        const totalSec = Math.floor(ms / 1000);
+        const m = Math.floor(totalSec / 60);
+        const s = totalSec % 60;
+        if (m <= 0) return `${totalSec} second${totalSec === 1 ? '' : 's'}`;
+        return `${m} minute${m === 1 ? '' : 's'}${s ? ' ' + s + ` second${s === 1 ? '' : 's'}` : ''}`;
+      };
+
+      const startThinking = () => {
+        stopThinking();
+        state.thinkingStartedAt = Date.now();
+        const wrap = ensureThinkingNode();
+        const span = wrap.querySelector('span');
+        const tick = () => {
+          if (!state.thinkingStartedAt) return;
+          const elapsed = Date.now() - state.thinkingStartedAt;
+          if (span) span.textContent = `Thinking… ${formatElapsed(elapsed)}`;
+        };
+        tick();
+        state.thinkingTimerId = setInterval(tick, 1000);
+        // Ensure the latest user message and Thinking… line are visible
+        scrollToBottom(body);
       };
 
       const styleId = 'viib-etch-ui-style';
@@ -905,6 +968,9 @@
         wrap.innerHTML = `<div class="ve-bubble"><pre>${escapeHtml(content || '')}</pre></div>`;
         body.appendChild(wrap);
         liveAutoScrollIfArmed();
+        if (state.running) {
+          startThinking();
+        }
       };
 
       const liveEnsureToolBlock = (cycleId, toolCallId, name, args) => {
@@ -1140,6 +1206,7 @@
               state.live.pendingUserEcho = null;
               return;
             }
+            stopThinking();
             liveAppendUserMessage(content);
           } catch {}
         });
@@ -1155,6 +1222,7 @@
         ev.addEventListener('assistant.reasoning.delta', (e) => {
           try {
             const data = JSON.parse(e.data || '{}');
+            stopThinking();
             const c = liveEnsureReasoningPanel(data.cycle_id || state.live.currentCycleId);
             if (!c) return;
             c.reasonText += String(data.delta || '');
@@ -1188,6 +1256,7 @@
         ev.addEventListener('assistant.response.delta', (e) => {
           try {
             const data = JSON.parse(e.data || '{}');
+            stopThinking();
             const c = liveEnsureAssistantCycle(data.cycle_id || state.live.currentCycleId);
             if (!c) return;
             c.respText += String(data.delta || '');
@@ -1208,6 +1277,7 @@
         ev.addEventListener('tool.start', (e) => {
           try {
             const data = JSON.parse(e.data || '{}');
+            stopThinking();
             const tb = liveEnsureToolBlock(data.cycle_id || state.live.currentCycleId, data.id, data.name, data.args);
             if (!tb) return;
             tb.running = true;
@@ -1226,6 +1296,7 @@
         ev.addEventListener('tool.data', (e) => {
           try {
             const data = JSON.parse(e.data || '{}');
+            stopThinking();
             const tb = liveEnsureToolBlock(data.cycle_id || state.live.currentCycleId, data.id, data.name, null);
             if (!tb) return;
             const d = data.data || {};
@@ -1244,6 +1315,7 @@
         ev.addEventListener('tool.end', (e) => {
           try {
             const data = JSON.parse(e.data || '{}');
+            stopThinking();
             const c = state.live.cycles.get(String(data.cycle_id || '')) || null;
             const tb = c ? c.toolBlocks.get(String(data.id || '')) : null;
             if (!tb) return;
@@ -1265,11 +1337,13 @@
         ev.addEventListener('run.done', async () => {
           state.live.running = false;
           setRunning(false);
+          stopThinking();
           // Refresh tabs so title changes show up
           refreshChats().catch(() => {});
         });
         ev.addEventListener('run.error', (e) => {
           setRunning(false);
+          stopThinking();
           console.error('run.error', e && e.data);
         });
       };
