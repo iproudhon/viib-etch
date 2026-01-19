@@ -281,17 +281,41 @@
           .ve-user .ve-bubble pre{margin:0;white-space:pre-wrap;word-break:break-word;font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";}
           .ve-assistant .ve-bubble{background:#ffffff;border-color:rgba(17,24,39,0.12);}
           /* Assistant message: single block, no extra background layer; collapses to a one-line preview */
-          .ve-assistant-block{cursor:pointer;background:transparent;padding:0;line-height:1.4;}
+          .ve-assistant-block{background:transparent;padding:0;line-height:1.4;position:relative;}
           .ve-assistant-block:hover{background:transparent;}
+          .ve-toggle{
+            position:absolute;
+            top:4px;
+            right:4px;
+            min-width:20px;
+            min-height:20px;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            border:none;
+            background:rgba(243,244,246,0.8);
+            color:#111827;
+            cursor:pointer;
+            font-size:11px;
+            line-height:1;
+            padding:0;
+            border-radius:5px;
+            z-index:2;
+          }
+          .ve-toggle:hover{background:rgba(229,231,235,0.8);}
+          @media (hover:hover) and (pointer:fine){
+            .ve-toggle{opacity:0;transition:opacity 120ms ease-in-out;}
+            .ve-assistant-block:hover .ve-toggle,
+            .ve-tool .ve-details:hover .ve-toggle{opacity:1;}
+          }
           .ve-assistant-block-main{min-width:0;}
-          /* Collapsed preview: single line + right-aligned ellipsis */
+          /* Collapsed preview: single line */
           .ve-assistant-preview{display:none;position:relative;overflow:hidden;white-space:nowrap;padding-right:14px;}
-          .ve-assistant-block.collapsed .ve-assistant-preview::after{content:'…';position:absolute;right:0;top:0;}
           .ve-assistant-full{display:block;}
           .ve-assistant-block.collapsed .ve-assistant-full{display:none;}
           .ve-assistant-block.collapsed .ve-assistant-preview{display:block;}
           .ve-details{border:1px solid rgba(17,24,39,0.12);border-radius:3px;background:#ffffff;overflow:hidden;}
-          .ve-details summary{list-style:none;cursor:pointer;padding:10px 12px;display:flex;align-items:center;gap:8px;color:#111827;background:#f9fafb;border-bottom:1px solid rgba(17,24,39,0.08);}
+          .ve-details summary{list-style:none;cursor:default;padding:10px 12px;display:flex;align-items:center;gap:8px;color:#111827;background:#f9fafb;border-bottom:1px solid rgba(17,24,39,0.08);position:relative;}
           .ve-details summary::-webkit-details-marker{display:none;}
           .ve-details .ve-details-body{padding:10px 12px;}
           .ve-pre{margin:0;white-space:pre-wrap;word-break:break-word;}
@@ -991,6 +1015,18 @@
             const block = document.createElement('div');
             block.className = 've-assistant-block' + (isCollapsed ? ' collapsed' : '');
 
+            const toggle = document.createElement('button');
+            toggle.type = 'button';
+            toggle.className = 've-toggle';
+            toggle.setAttribute('aria-label', 'Toggle assistant message');
+            toggle.textContent = isCollapsed ? '▶' : '▼';
+            toggle.addEventListener('click', (e) => {
+              e.stopPropagation();
+              const collapsed = block.classList.toggle('collapsed');
+              setCollapsedByUser(rk, collapsed);
+              toggle.textContent = collapsed ? '▶' : '▼';
+            });
+            block.appendChild(toggle);
             const main = document.createElement('div');
             main.className = 've-assistant-block-main';
 
@@ -1002,10 +1038,6 @@
             const full = document.createElement('div');
             full.className = 've-assistant-full';
 
-            block.addEventListener('click', () => {
-              const collapsed = block.classList.toggle('collapsed');
-              setCollapsedByUser(rk, collapsed);
-            });
             
             const content = document.createElement('div');
             content.className = 've-assistant-block-content';
@@ -1053,6 +1085,21 @@
                   <summary>${escapeHtml(name)} <span class="ve-muted">${escapeHtml(tid)}</span></summary>
                   <div class="ve-details-body"><div class="ve-tool-body">Loading…</div></div>
                 `;
+                const summary = det.querySelector('summary');
+                if (summary) {
+                  const tri = document.createElement('button');
+                  tri.type = 'button';
+                  tri.className = 've-toggle';
+                  tri.setAttribute('aria-label', 'Toggle tool details');
+                  tri.textContent = det.open ? '▼' : '▶';
+                  tri.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    det.open = !det.open;
+                    tri.textContent = det.open ? '▼' : '▶';
+                  });
+                  summary.appendChild(tri);
+                }
                 toolWrap.appendChild(det);
                 wrap.appendChild(toolWrap);
 
@@ -1124,6 +1171,13 @@
         const block = document.createElement('div');
         block.className = 've-assistant-block';
 
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 've-toggle';
+        toggle.setAttribute('aria-label', 'Toggle assistant message');
+        toggle.textContent = '▼';
+        block.appendChild(toggle);
+
         const main = document.createElement('div');
         main.className = 've-assistant-block-main';
 
@@ -1169,11 +1223,14 @@
           reasoningPinnedOpen: false,
         };
 
-        // Track user collapse/expand for live blocks
-        block.addEventListener('click', () => {
+        // Track user collapse/expand for live blocks via triangle only
+        toggle.addEventListener('click', (e) => {
+          e.stopPropagation();
           const wasCollapsed = block.classList.contains('collapsed');
-          block.classList.toggle('collapsed');
-          // If user explicitly opened while running, treat as pinned (don't auto-collapse).
+          const nowCollapsed = !wasCollapsed;
+          if (nowCollapsed) block.classList.add('collapsed');
+          else block.classList.remove('collapsed');
+          toggle.textContent = nowCollapsed ? '▶' : '▼';
           if (pane.live.running && wasCollapsed) c.reasoningPinnedOpen = true;
         });
         pane.live.cycles.set(cid, c);
@@ -1255,6 +1312,22 @@
           <summary>${escapeHtml(name || '(tool)')} <span class="ve-muted">${escapeHtml(tid)}</span></summary>
           <div class="ve-details-body"><div class="ve-tool-body">Running…</div></div>
         `;
+        const summary = det.querySelector('summary');
+        let tri = null;
+        if (summary) {
+          tri = document.createElement('button');
+          tri.type = 'button';
+          tri.className = 've-toggle';
+          tri.setAttribute('aria-label', 'Toggle tool details');
+          tri.textContent = det.open ? '▼' : '▶';
+          tri.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            det.open = !det.open;
+            tri.textContent = det.open ? '▼' : '▶';
+          });
+          summary.appendChild(tri);
+        }
         toolWrap.appendChild(det);
         c.toolsWrapEl.appendChild(toolWrap);
 
@@ -1273,6 +1346,7 @@
         };
         det.addEventListener('toggle', () => {
           tb.openedByUser = det.open;
+          if (tri) tri.textContent = det.open ? '▼' : '▶';
         });
         c.toolBlocks.set(tid, tb);
         return tb;
@@ -1291,6 +1365,8 @@
             tb.detailsEl.open = true;
             const sum = tb.detailsEl.querySelector('summary');
             if (sum) sum.textContent = 'Running';
+            const tri = sum ? sum.querySelector('.ve-toggle') : null;
+            if (tri) tri.textContent = tb.detailsEl.open ? '▼' : '▶';
           }
           tb.bodyEl.innerHTML = `
             <div class="ve-kv"><span class="ve-muted">Command</span></div>
@@ -1325,13 +1401,20 @@
           const { title, bodyHtml } = await renderTool((pane && pane.chat) ? pane.chat : (state.chat || { data: {} }), fakeTc, fakeToolMsg);
           if (tb.detailsEl && title) {
             const summaryEl = tb.detailsEl.querySelector('summary');
-            if (summaryEl) summaryEl.textContent = title;
+            if (summaryEl) {
+              summaryEl.textContent = title;
+              const tri = summaryEl.querySelector('.ve-toggle');
+              if (tri) tri.textContent = tb.detailsEl.open ? '▼' : '▶';
+            }
           }
           tb.bodyEl.innerHTML = bodyHtml;
           wireToolTabs(tb.bodyEl);
           // For run_terminal_cmd: collapse after done (it auto-expanded while streaming).
           if (tb.detailsEl && tb.name === 'run_terminal_cmd') {
             tb.detailsEl.open = false;
+            const sum = tb.detailsEl.querySelector('summary');
+            const tri = sum ? sum.querySelector('.ve-toggle') : null;
+            if (tri) tri.textContent = tb.detailsEl.open ? '▼' : '▶';
           }
           liveAutoScrollIfArmed(pane);
           return;
@@ -1755,9 +1838,16 @@
               const sum = tb.detailsEl.querySelector('summary');
               if (sum) sum.textContent = 'Ran';
               tb.detailsEl.open = false;
+              const tri = sum ? sum.querySelector('.ve-toggle') : null;
+              if (tri) tri.textContent = tb.detailsEl.open ? '▼' : '▶';
             } else {
               // Other tools: collapse once done unless user left it open intentionally
-              if (!tb.openedByUser && tb.detailsEl) tb.detailsEl.open = false;
+              if (!tb.openedByUser && tb.detailsEl) {
+                tb.detailsEl.open = false;
+                const sum = tb.detailsEl.querySelector('summary');
+                const tri = sum ? sum.querySelector('.ve-toggle') : null;
+                if (tri) tri.textContent = tb.detailsEl.open ? '▼' : '▶';
+              }
             }
             liveAutoScrollIfArmed(pane);
           } catch {}
@@ -2076,6 +2166,10 @@
 </html>`;
     }
 
+    // Module-level default tokens file name; can be overridden via
+    // createViibEtchUI.setTokensFile(...) before creating any UI instances.
+    let DEFAULT_TOKENS_FILE = '.viib-etch-tokens';
+
     function createViibEtchUI(options) {
       const opts = options || {};
       const basePath = (opts.basePath || '').replace(/\/+$/, '');
@@ -2083,7 +2177,14 @@
       const apiBase = basePath + (opts.apiPath || '/api');
       const uiJsPath = basePath + (opts.uiJsPath || '/viib-etch-ui.js');
       const token = opts.token || process.env.VIIB_ETCH_UI_TOKEN || '';
-      const tokensFile = opts.tokensFile || process.env.VIIB_ETCH_TOKENS_FILE || '.viib-etch-tokens';
+      // tokensFile resolution order:
+      //   1. explicit opts.tokensFile
+      //   2. VIIB_ETCH_TOKENS_FILE env var
+      //   3. module-level DEFAULT_TOKENS_FILE (overridable via setTokensFile)
+      const tokensFile =
+        opts.tokensFile ||
+        process.env.VIIB_ETCH_TOKENS_FILE ||
+        DEFAULT_TOKENS_FILE;
       const chatsDir = opts.chatsDir || null;
       const modelsFile = opts.modelsFile || null;
 
@@ -2739,6 +2840,15 @@
 
       return { handler, createHttpsServer, createHttpServer, uiPath, apiBase, uiJsPath };
     }
+
+    // Allow embedding programs to set the default tokens file name used by
+    // viib-etch. Call this *before* creating any UI instances.
+    createViibEtchUI.setTokensFile = function (filePath) {
+      if (!filePath || typeof filePath !== 'string') {
+        throw new Error('setTokensFile: filePath must be a non-empty string');
+      }
+      DEFAULT_TOKENS_FILE = filePath;
+    };
 
     module.exports = { createViibEtchUI };
 
