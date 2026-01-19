@@ -96,5 +96,12 @@
         "system_prompt_file": "/data/sjung/src/viib-etch/viib-etch.system.trader.prompt",
         "tools": ["run_terminal_cmd", "rg", "delete_file", "read_lints", "todo_write", "apply_patch", "read_file", "list_dir", "glob_file_search", "web_search_preview"],
         "reasoning_effort": "high"
+    },
+    {
+        "name": "gemini-3-pro-image-preview",
+        "model": "gemini-3-pro-image-preview",
+        "baseUrl": "https://generativelanguage.googleapis.com",
+        "api_key_file": "/data/sjung/src/viib-etch/.google-api-key",
+        "reasoning_effort": "off"
     }
 ]
