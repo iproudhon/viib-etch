@@ -531,7 +531,7 @@
         return assistantIdxToTools;
       };
 
-      const renderToolBody = async (chat, tc, toolMsg) => {
+      const renderTool = async (chat, tc, toolMsg) => {
         const name = tc?.function?.name || toolMsg?.name || '(tool)';
         let argsText = tc?.function?.arguments || '';
         // toolMsg.content is JSON stringified result (without _diff/_patchCommand for apply_patch)
@@ -545,6 +545,14 @@
 
         // Helper: pretty JSON body
         const prettyJson = (obj) => `<pre class="ve-pre">${escapeHtml(JSON.stringify(obj, null, 2))}</pre>`;
+
+        const safeGet = (obj, path, fallback) => {
+          try {
+            return path.split('.').reduce((acc, key) => (acc && acc[key] !== undefined ? acc[key] : undefined), obj) ?? fallback;
+          } catch {
+            return fallback;
+          }
+        };
         // (parseTodoWriteTodosFromResult is defined at mount() scope)
 
         if (name === 'run_terminal_cmd') {
@@ -552,22 +560,87 @@
             try { return JSON.parse(argsText).command; } catch { return null; }
           })() : null) || '';
           const out = parsed && (parsed.stdout || parsed.stderr) ? `${parsed.stdout || ''}${parsed.stderr ? (parsed.stdout ? '\n' : '') + parsed.stderr : ''}` : '';
-          const tail = clampLines(out, 24);
-          return `
+          const title = `Ran`;
+          const bodyHtml = `
             <div class="ve-kv"><span class="ve-muted">Command</span></div>
             <pre class="ve-pre">${escapeHtml(cmd)}</pre>
-            <div class="ve-kv" style="margin-top:8px"><span class="ve-muted">Output (tail 24 lines)</span></div>
-            <pre class="ve-pre">${escapeHtml(tail)}</pre>
+            <div class="ve-kv" style="margin-top:8px"><span class="ve-muted">Output</span></div>
+            <pre class="ve-pre" style="max-height:24em;overflow:auto;">${escapeHtml(out || '')}</pre>
           `;
+          return { title, bodyHtml };
         }
 
         if (name === 'rg') {
-          let pattern = '';
-          try { pattern = JSON.parse(argsText || '{}').pattern || ''; } catch {}
-          return `
-            <div class="ve-kv"><span class="ve-muted">Grepped</span> <span>${escapeHtml(pattern)}</span></div>
-            <pre class="ve-pre">${escapeHtml(raw || '')}</pre>
-          `;
+          let argsObj = null;
+          try { argsObj = JSON.parse(argsText || '{}'); } catch { argsObj = null; }
+          const pattern = argsObj && argsObj.pattern ? String(argsObj.pattern) : '';
+          const path = argsObj && argsObj.path ? String(argsObj.path) : '';
+          const headLimit = argsObj && typeof argsObj.head_limit === 'number' ? argsObj.head_limit : null;
+          let matchCount = '';
+          if (parsed && typeof parsed === 'object') {
+            const c = safeGet(parsed, 'count', null);
+            if (typeof c === 'number') matchCount = `${c} matches`;
+          }
+          const title = `Grep ${pattern || '(no pattern)'}${path ? ' ' + path : ''}${matchCount ? ' {' + matchCount + '}' : ''}`;
+          const bodyHtml = `<pre class="ve-pre">${escapeHtml(raw || '')}</pre>`;
+          return { title, bodyHtml };
+        }
+
+        if (name === 'list_dir') {
+          let argsObj = null;
+          try { argsObj = JSON.parse(argsText || '{}'); } catch { argsObj = null; }
+          const dir = argsObj && (argsObj.target_directory || argsObj.directory) ? String(argsObj.target_directory || argsObj.directory) : '.';
+          let count = '';
+          if (Array.isArray(parsed)) count = parsed.length.toString();
+          const title = `List directory ${dir}${count ? ' {' + count + ' entries}' : ''}`;
+          const bodyHtml = parsed !== null && parsed !== undefined ? prettyJson(parsed) : `<pre class="ve-pre">${escapeHtml(raw || '')}</pre>`;
+          return { title, bodyHtml };
+        }
+
+        if (name === 'glob_file_search') {
+          let argsObj = null;
+          try { argsObj = JSON.parse(argsText || '{}'); } catch { argsObj = null; }
+          const pattern = argsObj && argsObj.glob_pattern ? String(argsObj.glob_pattern) : '';
+          const dir = argsObj && argsObj.target_directory ? String(argsObj.target_directory) : '';
+          let count = '';
+          if (Array.isArray(parsed)) count = parsed.length.toString();
+          const title = `File searching ${pattern || '(no pattern)'}${dir ? ' ' + dir : ''}${count ? ' {' + count + ' matches}' : ''}`;
+          const bodyHtml = parsed !== null && parsed !== undefined ? prettyJson(parsed) : `<pre class="ve-pre">${escapeHtml(raw || '')}</pre>`;
+          return { title, bodyHtml };
+        }
+
+        if (name === 'read_file') {
+          let argsObj = null;
+          try { argsObj = JSON.parse(argsText || '{}'); } catch { argsObj = null; }
+          const target = argsObj && argsObj.target_file ? String(argsObj.target_file) : '';
+          const base = target.split(/[\\/]/).filter(Boolean).pop() || target || '(file)';
+          let content = '';
+          if (typeof parsed === 'string') content = parsed; else content = raw || '';
+          const lines = content ? content.split('\n').length : 0;
+          const startLine = (typeof argsObj?.offset === 'number' && argsObj.offset > 0) ? argsObj.offset : 1;
+          const endLine = lines ? startLine + lines - 1 : startLine;
+          const title = `Read ${base} L${startLine}:${endLine}`;
+          const bodyHtml = `<pre class="ve-pre">${escapeHtml(content)}</pre>`;
+          return { title, bodyHtml };
+        }
+
+        if (name === 'delete_file') {
+          let argsObj = null;
+          try { argsObj = JSON.parse(argsText || '{}'); } catch { argsObj = null; }
+          const target = argsObj && argsObj.target_file ? String(argsObj.target_file) : '';
+          const ok = parsed && typeof parsed === 'object' && parsed.success === true;
+          const title = `Delete ${target || '(file)'} ${ok ? 'success' : 'failed'}`;
+          const bodyHtml = parsed !== null && parsed !== undefined ? prettyJson(parsed) : `<pre class="ve-pre">${escapeHtml(raw || '')}</pre>`;
+          return { title, bodyHtml };
+        }
+
+        if (name === 'read_lints') {
+          let argsObj = null;
+          try { argsObj = JSON.parse(argsText || '{}'); } catch { argsObj = null; }
+          const paths = Array.isArray(argsObj?.paths) ? argsObj.paths.join(', ') : (argsObj?.paths || '');
+          const title = `Lint ${paths || '(all)'}`;
+          const bodyHtml = parsed !== null && parsed !== undefined ? prettyJson(parsed) : `<pre class="ve-pre">${escapeHtml(raw || '')}</pre>`;
+          return { title, bodyHtml };
         }
 
         if (name === 'apply_patch' || name === 'edit_file') {
@@ -579,17 +652,40 @@
           const tabId = `tab_${Math.random().toString(16).slice(2)}`;
           const cmdHtml = `<pre class="ve-pre">${escapeHtml(patchCommand || '')}</pre>`;
           const diffHtml = `<pre class="ve-pre">${escapeHtml(diff || raw || '')}</pre>`;
+          // "Output" is the tool's returned content sent back to the LLM (toolMsg.content / raw).
+          const outputHtml = `<pre class="ve-pre">${escapeHtml(raw || '')}</pre>`;
           // Tabs are wired after insertion (simple, minimal JS).
-          return `
+          const bodyHtml = `
             <div class="ve-tool-tabs" data-tabs="${tabId}">
               <div class="ve-tool-tab ve-active" data-tab="cmd">Command</div>
               <div class="ve-tool-tab" data-tab="diff">Diff</div>
+              <div class="ve-tool-tab" data-tab="out">Output</div>
             </div>
             <div data-tabs-body="${tabId}">
               <div data-pane="cmd">${cmdHtml}</div>
               <div data-pane="diff" style="display:none">${diffHtml}</div>
+              <div data-pane="out" style="display:none">${outputHtml}</div>
             </div>
           `;
+
+          // Try to extract file names from diff text for the title.
+          let files = [];
+          const diffText = diff || '';
+          diffText.split('\n').forEach((line) => {
+            // Unified diff lines like "*** Update File: path" or "*** Add File: path"
+            const m = line.match(/\*\*\* (?:Update|Add) File: (.+)$/);
+            if (m && m[1]) files.push(m[1].trim());
+          });
+          if (!files.length && patchCommand) {
+            // Fallback: look for "File: path" patterns in patchCommand
+            patchCommand.split('\n').forEach((line) => {
+              const m = line.match(/File:\s+(.+)$/);
+              if (m && m[1]) files.push(m[1].trim());
+            });
+          }
+          // Keep title simple per requirements.
+          const title = name === 'apply_patch' ? 'Apply patch' : 'Edit file';
+          return { title, bodyHtml };
         }
 
         if (name === 'todo_write') {
@@ -636,7 +732,7 @@
               ? (typeof resultObj === 'object' ? prettyJson(resultObj) : `<pre class="ve-pre">${escapeHtml(String(resultObj))}</pre>`)
               : `<pre class="ve-pre">${escapeHtml(raw || '')}</pre>`;
 
-          return `
+          const bodyHtml = `
             <div class="ve-tool-tabs" data-tabs="${tabId}">
               <div class="ve-tool-tab ve-active" data-tab="todos">Todos</div>
               <div class="ve-tool-tab" data-tab="args">Args</div>
@@ -648,17 +744,21 @@
               <div data-pane="result" style="display:none">${resultHtml}</div>
             </div>
           `;
+          const title = `Todo write {${count} todos}`;
+          return { title, bodyHtml };
         }
 
         // Default: show args + raw content
         let argsPretty = null;
         try { argsPretty = JSON.parse(argsText || '{}'); } catch { argsPretty = null; }
-        return `
+        const title = name || '(tool)';
+        const bodyHtml = `
           <div class="ve-kv"><span class="ve-muted">Args</span></div>
           ${argsPretty ? prettyJson(argsPretty) : `<pre class="ve-pre">${escapeHtml(argsText || '')}</pre>`}
           <div class="ve-kv" style="margin-top:8px"><span class="ve-muted">Result</span></div>
           <pre class="ve-pre">${escapeHtml(raw || '')}</pre>
         `;
+        return { title, bodyHtml };
       };
 
       const wireToolTabs = (scope) => {
@@ -781,25 +881,14 @@
                 const toolMsg = t.toolMsg;
                 const name = toolCall?.function?.name || toolMsg?.name || '(tool)';
                 const tid = toolCall?.id ? String(toolCall.id) : '';
-                let summaryTitle = null;
-                if (name === 'todo_write') {
-                  let ok = false;
-                  // Title requested: "Todo: success|failure" (no count)
-                  try {
-                    const resObj = toolMsg && toolMsg.content ? JSON.parse(toolMsg.content) : null;
-                    ok = !!(resObj && resObj.success === true);
-                  } catch {
-                    ok = false;
-                  }
-                  summaryTitle = `Todo: ${ok ? 'success' : 'failure'}`;
-                }
                 const toolWrap = document.createElement('div');
                 toolWrap.className = 've-tool';
                 const det = document.createElement('details');
                 det.className = 've-details';
                 det.open = false;
+                // Summary title should be correct immediately in replay (body stays lazy/collapsed).
                 det.innerHTML = `
-                  <summary>${summaryTitle ? escapeHtml(summaryTitle) : `${escapeHtml(name)} <span class="ve-muted">${escapeHtml(tid)}</span>`}</summary>
+                  <summary>${escapeHtml(name)} <span class="ve-muted">${escapeHtml(tid)}</span></summary>
                   <div class="ve-details-body"><div class="ve-tool-body">Loading…</div></div>
                 `;
                 toolWrap.appendChild(det);
@@ -808,17 +897,28 @@
                 // Lazy render body only when opened (replay)
                 const fill = async () => {
                   const bodyEl = det.querySelector('.ve-tool-body');
+                  const summaryEl = det.querySelector('summary');
                   if (!bodyEl || bodyEl.getAttribute('data-filled') === '1') return;
                   bodyEl.textContent = 'Rendering…';
                   try {
-                    const html = await renderToolBody(chat, toolCall, toolMsg);
-                    bodyEl.innerHTML = html;
+                    const { title, bodyHtml } = await renderTool(chat, toolCall, toolMsg);
+                    if (summaryEl && title) summaryEl.textContent = title;
+                    bodyEl.innerHTML = bodyHtml;
                     bodyEl.setAttribute('data-filled', '1');
                     wireToolTabs(bodyEl);
                   } catch (err) {
                     bodyEl.innerHTML = `<pre class="ve-pre">${escapeHtml(String(err && err.message ? err.message : err))}</pre>`;
                   }
                 };
+
+                // Eagerly compute and set the summary title for replay (no body render).
+                (async () => {
+                  try {
+                    const summaryEl = det.querySelector('summary');
+                    const { title } = await renderTool(chat, toolCall, toolMsg);
+                    if (summaryEl && title) summaryEl.textContent = title;
+                  } catch {}
+                })();
                 det.addEventListener('toggle', () => { if (det.open) fill(); });
               }
             }
@@ -985,7 +1085,7 @@
         toolWrap.className = 've-tool';
         const det = document.createElement('details');
         det.className = 've-details';
-        det.open = true; // live: expanded during running
+        det.open = false; // collapsed by default in live view as well
         det.innerHTML = `
           <summary>${escapeHtml(name || '(tool)')} <span class="ve-muted">${escapeHtml(tid)}</span></summary>
           <div class="ve-details-body"><div class="ve-tool-body">Running…</div></div>
@@ -1018,16 +1118,26 @@
         const name = tb.name;
         // Streaming terminal output
         if (name === 'run_terminal_cmd' && tb.outText) {
-          const tail = clampLines(tb.outText, 24);
           const cmd = (() => {
             try { return tb.args && tb.args.command ? String(tb.args.command) : ''; } catch { return ''; }
           })();
+          // While running: expand and show streaming output.
+          if (tb.detailsEl) {
+            tb.detailsEl.open = true;
+            const sum = tb.detailsEl.querySelector('summary');
+            if (sum) sum.textContent = 'Running';
+          }
           tb.bodyEl.innerHTML = `
             <div class="ve-kv"><span class="ve-muted">Command</span></div>
             <pre class="ve-pre">${escapeHtml(cmd)}</pre>
-            <div class="ve-kv" style="margin-top:8px"><span class="ve-muted">Output (tail 24 lines)</span></div>
-            <pre class="ve-pre">${escapeHtml(tail)}</pre>
+            <div class="ve-kv" style="margin-top:8px"><span class="ve-muted">Output</span></div>
+            <pre class="ve-pre" data-autoscroll="1" style="max-height:24em;overflow:auto;">${escapeHtml(tb.outText || '')}</pre>
           `;
+          // Auto-scroll output to bottom while streaming
+          try {
+            const outEl = tb.bodyEl.querySelector('[data-autoscroll="1"]');
+            if (outEl) outEl.scrollTop = outEl.scrollHeight;
+          } catch {}
           liveAutoScrollIfArmed();
           return;
         }
@@ -1047,9 +1157,17 @@
             name: tb.name,
             content: typeof tb.result === 'string' ? tb.result : JSON.stringify(tb.result),
           };
-          const html = await renderToolBody(state.chat || { data: {} }, fakeTc, fakeToolMsg);
-          tb.bodyEl.innerHTML = html;
+          const { title, bodyHtml } = await renderTool(state.chat || { data: {} }, fakeTc, fakeToolMsg);
+          if (tb.detailsEl && title) {
+            const summaryEl = tb.detailsEl.querySelector('summary');
+            if (summaryEl) summaryEl.textContent = title;
+          }
+          tb.bodyEl.innerHTML = bodyHtml;
           wireToolTabs(tb.bodyEl);
+          // For run_terminal_cmd: collapse after done (it auto-expanded while streaming).
+          if (tb.detailsEl && tb.name === 'run_terminal_cmd') {
+            tb.detailsEl.open = false;
+          }
           liveAutoScrollIfArmed();
           return;
         }
@@ -1281,15 +1399,7 @@
             const tb = liveEnsureToolBlock(data.cycle_id || state.live.currentCycleId, data.id, data.name, data.args);
             if (!tb) return;
             tb.running = true;
-            tb.detailsEl.open = true;
-            const sum = tb.detailsEl.querySelector('summary');
-            if (sum) {
-              if (tb.name === 'todo_write') {
-                sum.textContent = `Todo: running`;
-              } else {
-                sum.innerHTML = `${escapeHtml(tb.name)} <span class="ve-muted">${escapeHtml(tb.toolCallId)}</span> <span class="ve-muted">Running</span>`;
-              }
-            }
+            // Title will be set once result is available via renderTool; avoid temporary "Running" suffix.
             liveAutoScrollIfArmed();
           } catch {}
         });
@@ -1320,17 +1430,20 @@
             const tb = c ? c.toolBlocks.get(String(data.id || '')) : null;
             if (!tb) return;
             tb.running = false;
-            const sum = tb.detailsEl.querySelector('summary');
-            if (sum) {
-              if (tb.name === 'todo_write') {
-                const ok = !!(tb.result && typeof tb.result === 'object' && tb.result.success === true);
-                sum.textContent = `Todo: ${ok ? 'success' : 'failure'}`;
-              } else {
-                sum.innerHTML = `${escapeHtml(tb.name)} <span class="ve-muted">${escapeHtml(tb.toolCallId)}</span> <span class="ve-muted">Ran</span>`;
-              }
+            // If backend provided an enriched final result on tool.end, update and re-render.
+            if (data && data.result !== undefined && data.result !== null) {
+              tb.result = data.result;
+              liveUpdateToolBlock(tb).catch(() => {});
             }
-            // Collapse once done unless user left it open intentionally
-            if (!tb.openedByUser) tb.detailsEl.open = false;
+            // For run_terminal_cmd, explicitly mark as Ran and collapse once done.
+            if (tb.name === 'run_terminal_cmd' && tb.detailsEl) {
+              const sum = tb.detailsEl.querySelector('summary');
+              if (sum) sum.textContent = 'Ran';
+              tb.detailsEl.open = false;
+            } else {
+              // Other tools: collapse once done unless user left it open intentionally
+              if (!tb.openedByUser && tb.detailsEl) tb.detailsEl.open = false;
+            }
             liveAutoScrollIfArmed();
           } catch {}
         });
@@ -2064,23 +2177,71 @@
             };
             llm.hooks.onToolCallData = async (toolCall, data) => {
               await callConsole('onToolCallData', toolCall, data);
+              const toolId = toolCall && toolCall.id ? String(toolCall.id) : null;
+              const toolName = toolCall?.function?.name || null;
+
+              // For apply_patch/edit_file: when emitting the final result phase,
+              // include patchCommand/diff from chat.data.diffs so live UI can render tabs.
+              let payloadData = data || null;
+              try {
+                if (
+                  toolId &&
+                  (toolName === 'apply_patch' || toolName === 'edit_file') &&
+                  payloadData &&
+                  typeof payloadData === 'object' &&
+                  payloadData.phase === 'result'
+                ) {
+                  const chatObj = llm && llm.chat ? llm.chat : null;
+                  const rec = chatObj && chatObj.data && chatObj.data.diffs ? chatObj.data.diffs[toolId] : null;
+                  if (rec && (rec.patchCommand || rec.diff)) {
+                    payloadData = {
+                      ...payloadData,
+                      result: (payloadData.result && typeof payloadData.result === 'object')
+                        ? { ...payloadData.result, patchCommand: rec.patchCommand || null, diff: rec.diff || null }
+                        : { result: payloadData.result, patchCommand: rec.patchCommand || null, diff: rec.diff || null },
+                    };
+                  }
+                }
+              } catch {}
+
               emit(chatId, 'tool.data', {
-                id: toolCall && toolCall.id ? String(toolCall.id) : null,
-                name: toolCall?.function?.name || null,
-                data: data || null,
+                id: toolId,
+                name: toolName,
+                data: payloadData,
                 cycle_id: currentCycleId,
                 ts: nowIso(),
               });
             };
             llm.hooks.onToolCallEnd = async (toolCall, data, elapsed) => {
               await callConsole('onToolCallEnd', toolCall, data, elapsed);
+              const toolId = toolCall && toolCall.id ? String(toolCall.id) : null;
+              const toolName = toolCall?.function?.name || null;
+
+              // For apply_patch/edit_file: include stored patchCommand/diff in the live SSE payload
+              // so the UI can render Command/Diff/Output consistently without waiting for replay.
+              let enriched = data || null;
+              try {
+                if (toolId && (toolName === 'apply_patch' || toolName === 'edit_file')) {
+                  const chatObj = llm && llm.chat ? llm.chat : null;
+                  const rec = chatObj && chatObj.data && chatObj.data.diffs ? chatObj.data.diffs[toolId] : null;
+                  if (rec && (rec.patchCommand || rec.diff)) {
+                    const base = (enriched && typeof enriched === 'object') ? enriched : { result: enriched };
+                    enriched = {
+                      ...base,
+                      patchCommand: rec.patchCommand || null,
+                      diff: rec.diff || null,
+                    };
+                  }
+                }
+              } catch {}
+
               emit(chatId, 'tool.end', {
-                id: toolCall && toolCall.id ? String(toolCall.id) : null,
-                name: toolCall?.function?.name || null,
+                id: toolId,
+                name: toolName,
                 elapsed_ms: elapsed || null,
                 cycle_id: currentCycleId,
                 ts: nowIso(),
-                result: data || null,
+                result: enriched,
               });
             };
             llm.hooks.onTitle = async (title) => {
