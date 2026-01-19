@@ -5,6 +5,7 @@
   "main": "viib-etch.js",
   "files": [
     "viib-etch.js",
+    "viib-etch-ui.js",
     "viib-etch-tools.js",
     "viib-etch-tools.json",
     "viib-etch-models.json",
