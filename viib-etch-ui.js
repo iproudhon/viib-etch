@@ -63,16 +63,14 @@
         live: {
           running: false,
           currentCycleId: null,
-          // cycleId -> { rootEl, respDetails, respMdEl, reasonDetails, reasonMdEl, toolsWrapEl, toolBlocks: Map(toolCallId -> { detailsEl, bodyEl, outText, running, openedByUser, name, args }) }
           cycles: new Map(),
-          // throttle: key -> timer
           mdTimers: new Map(),
-          // for optimistic user message append (avoid duplicate when SSE echoes it back)
           pendingUserEcho: null,
         },
-        // UI-state
-        collapsedByUser: new Set(), // keys like "reasoning:<msgIndex>"
-        toolUi: new Map(), // toolCallId -> { running:boolean, openedByUser?:boolean }
+        collapsedByUser: new Set(),
+        toolUi: new Map(),
+        chatStatus: new Map(),
+        chatMeta: new Map(),
       };
 
       const getToken = () => state.token || localStorage.getItem(options.tokenStorageKey) || '';
@@ -250,13 +248,13 @@
           .ve-iconbtn.ve-config:hover{background:rgba(17,24,39,0.05);}
           .ve-iconbtn.ve-folder{border:none;background:transparent;padding:6px 8px;}
           .ve-iconbtn.ve-folder:hover{background:rgba(17,24,39,0.05);}
-          .ve-tabs{flex:1;display:flex;gap:8px;overflow:auto;scrollbar-width:none;}
+          .ve-tabs{flex:1;display:flex;gap:6px;overflow:auto;scrollbar-width:none;}
           .ve-tabs::-webkit-scrollbar{display:none;}
-          .ve-tab{flex:0 0 auto;max-width:280px;display:flex;align-items:center;gap:8px;padding:6px 26px 6px 10px;border-radius:3px;border:1px solid rgba(17,24,39,0.12);background:#f9fafb;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:relative;}
-          .ve-tab.ve-active{border-color:rgba(37,99,235,0.55);background:#eef2ff;}
-          .ve-tab .ve-tab-x{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:18px;height:18px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(17,24,39,0.14);background:#ffffff;color:#111827;border-radius:3px;opacity:0;pointer-events:none;}
-          .ve-tab:hover .ve-tab-x{opacity:1;pointer-events:auto;}
-          @media (hover: none), (pointer: coarse) { .ve-tab .ve-tab-x{opacity:1;pointer-events:auto;} }
+          .ve-tab{flex:0 0 auto;max-width:220px;display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:3px;border:1px solid rgba(209,213,219,1);background:#f9fafb;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:relative;font-size:12px;line-height:1.3;}
+          .ve-tab.ve-active{border-color:rgba(37,99,235,1);box-shadow:0 0 0 1px rgba(37,99,235,0.35);background:#e0ebff;}
+          .ve-tab.ve-running{border-color:rgba(37,99,235,1);box-shadow:0 0 0 1px rgba(37,99,235,0.6);}
+          .ve-tab.ve-unread{border-color:rgba(220,38,38,0.9);box-shadow:0 0 0 1px rgba(220,38,38,0.3);}
+          .ve-tab .ve-tab-x{display:none;}
           .ve-tab small{opacity:0.7}
           .ve-body{flex:1;overflow:auto;padding:14px 12px 10px;scrollbar-gutter:stable;position:relative;}
           .ve-footer{position:sticky;bottom:0;z-index:5;border-top:1px solid rgba(17,24,39,0.10);background:#ffffff;padding:10px 12px;display:flex;flex-direction:column;gap:8px;}
@@ -444,23 +442,64 @@
         else state.collapsedByUser.delete(key);
       };
 
+      const getOrInitChatStatus = (chatId) => {
+        const id = String(chatId);
+        let v = state.chatStatus.get(id);
+        if (!v) {
+          v = { running: false, unread: false };
+          state.chatStatus.set(id, v);
+        }
+        return v;
+      };
+
+      const getOrInitChatMeta = (chat) => {
+        if (!chat || !chat.id) return null;
+        const id = String(chat.id);
+        const modifiedMs = chat.modified ? new Date(chat.modified).getTime() : Date.now();
+        let meta = state.chatMeta.get(id);
+        if (!meta) {
+          meta = { lastKnownModified: modifiedMs, lastSeenModified: modifiedMs };
+          state.chatMeta.set(id, meta);
+        } else if (!meta.lastKnownModified || modifiedMs > meta.lastKnownModified) {
+          meta.lastKnownModified = modifiedMs;
+        }
+        return meta;
+      };
+
       const renderTabs = () => {
         tabs.innerHTML = '';
+        const runningEls = [];
         for (const c of state.chats) {
+          getOrInitChatStatus(c.id);
+          const st = state.chatStatus.get(String(c.id)) || { running: false, unread: false };
           const el = document.createElement('div');
-          el.className = 've-tab' + (state.chatId === c.id ? ' ve-active' : '');
+          let cls = 've-tab';
+          if (state.chatId === c.id) cls += ' ve-active';
+          if (st.running) cls += ' ve-running';
+          if (st.unread) cls += ' ve-unread';
+          el.className = cls;
           const title = c.title || 'New Chat';
-          el.innerHTML = `<span>${escapeHtml(title)}</span><button class="ve-tab-x" title="Delete" aria-label="Delete">x</button>`;
-          el.addEventListener('click', () => openChatId(c.id));
-          const xbtn = el.querySelector('.ve-tab-x');
-          if (xbtn) {
-            xbtn.addEventListener('click', (e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              deleteChatId(c.id).catch((err) => alert(String(err && err.message ? err.message : err)));
-            });
-          }
+          el.innerHTML = `<span>${escapeHtml(title)}</span>`;
+          el.addEventListener('click', (e) => {
+            const id = String(c.id);
+            if (!state.chat || state.chatId !== id) {
+              openChatId(id).catch((err) => alert(String(err && err.message ? err.message : err)));
+              return;
+            }
+            openChatTabMenu(e, c);
+          });
           tabs.appendChild(el);
+          if (st.running) runningEls.push(el);
+        }
+        if (runningEls.length && tabs.clientWidth && tabs.scrollWidth > tabs.clientWidth) {
+          const first = runningEls[0];
+          const last = runningEls[runningEls.length - 1];
+          const leftEdge = first.offsetLeft;
+          const rightEdge = last.offsetLeft + last.offsetWidth;
+          const viewLeft = tabs.scrollLeft;
+          const viewRight = viewLeft + tabs.clientWidth;
+          if (leftEdge < viewLeft) tabs.scrollLeft = leftEdge;
+          else if (rightEdge > viewRight) tabs.scrollLeft = rightEdge - tabs.clientWidth;
         }
       };
 
@@ -1174,14 +1213,21 @@
       };
 
       const refreshChats = async () => {
-        state.chats = await apiFetch('/chats');
+        const sessions = await apiFetch('/chats');
+        state.chats = sessions;
+        for (const c of sessions) {
+          const meta = getOrInitChatMeta(c);
+          if (!meta) continue;
+          const st = getOrInitChatStatus(c.id);
+          const known = meta.lastKnownModified || 0;
+          const seen = meta.lastSeenModified || 0;
+          st.unread = known > seen && String(state.chatId) !== String(c.id);
+        }
         renderTabs();
       };
 
       const deleteChatId = async (chatId) => {
         const id = String(chatId);
-        // Basic confirmation (single click can be dangerous)
-        if (!confirm('Delete this chat?')) return;
         await apiFetch(`/chat/${encodeURIComponent(id)}`, { method: 'DELETE' });
         // If we deleted current chat, switch to next available
         const wasCurrent = state.chatId === id;
@@ -1196,17 +1242,103 @@
         }
       };
 
+      const openChatTabMenu = (evt, chatSummary) => {
+        evt.preventDefault();
+        const id = String(chatSummary.id);
+        const existing = document.querySelector('[data-chat-menu="1"]');
+        if (existing) existing.parentNode.removeChild(existing);
+        const menu = document.createElement('div');
+        menu.setAttribute('data-chat-menu', '1');
+        menu.style.position = 'fixed';
+        menu.style.zIndex = '10';
+        menu.style.background = '#ffffff';
+        menu.style.border = '1px solid rgba(17,24,39,0.14)';
+        menu.style.borderRadius = '3px';
+        menu.style.minWidth = '180px';
+        menu.style.boxShadow = '0 4px 10px rgba(0,0,0,0.08)';
+        menu.style.font = '13px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji"';
+        menu.style.padding = '4px 0';
+        const rect = evt.currentTarget.getBoundingClientRect();
+        const topPos = rect.bottom + 4;
+        const leftPos = Math.min(rect.left, window.innerWidth - 190);
+        menu.style.top = `${topPos}px`;
+        menu.style.left = `${leftPos}px`;
+        const makeItem = (label, onClick) => {
+          const item = document.createElement('button');
+          item.textContent = label;
+          item.style.display = 'block';
+          item.style.width = '100%';
+          item.style.padding = '6px 12px';
+          item.style.border = 'none';
+          item.style.background = 'transparent';
+          item.style.textAlign = 'left';
+          item.style.font = 'inherit';
+          item.style.cursor = 'pointer';
+          item.style.color = '#111827';
+          item.addEventListener('click', () => {
+            if (onClick) onClick();
+            if (menu.parentNode) menu.parentNode.removeChild(menu);
+          });
+          item.addEventListener('mouseover', () => { item.style.background = '#f3f4f6'; });
+          item.addEventListener('mouseout', () => { item.style.background = 'transparent'; });
+          return item;
+        };
+        menu.appendChild(makeItem('Rename', () => {
+          const currentTitle = chatSummary.title || 'New Chat';
+          const next = prompt('New title', currentTitle);
+          if (next === null) return;
+          const body = { title: String(next || '').trim() || null };
+          apiFetch(`/chat/${encodeURIComponent(id)}/title`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          }).then(() => refreshChats()).catch((e) => alert(String(e && e.message ? e.message : e)));
+        }));
+        menu.appendChild(makeItem('Refresh', () => {
+          if (state.chatId === id) {
+            openChatId(id).catch((e) => alert(String(e && e.message ? e.message : e)));
+          } else {
+            refreshChats().catch((e) => alert(String(e && e.message ? e.message : e)));
+          }
+        }));
+        menu.appendChild(makeItem('Set directory', () => {
+          state.chatId = id;
+          openBaseDirModal();
+        }));
+        menu.appendChild(makeItem('Delete…', () => {
+          if (!confirm('Delete this chat?')) return;
+          deleteChatId(id).catch((e) => alert(String(e && e.message ? e.message : e)));
+        }));
+        document.body.appendChild(menu);
+        const closeOnOutside = (e) => {
+          if (!menu.contains(e.target)) {
+            if (menu.parentNode) menu.parentNode.removeChild(menu);
+            document.removeEventListener('mousedown', closeOnOutside);
+            document.removeEventListener('touchstart', closeOnOutside);
+          }
+        };
+        document.addEventListener('mousedown', closeOnOutside);
+        document.addEventListener('touchstart', closeOnOutside);
+      };
+
       const refreshModels = async () => {
         state.models = await apiFetch('/models');
         renderModels();
       };
 
       const openChatId = async (chatId) => {
-        state.chatId = String(chatId);
+        const id = String(chatId);
+        if (state.chat && state.chatId === id) return;
+        state.chatId = id;
         localStorage.setItem(options.chatStorageKey, state.chatId);
         renderTabs();
         state.chat = await apiFetch(`/chat/${encodeURIComponent(state.chatId)}`);
         await renderChat(state.chat, true);
+        const meta = state.chatMeta.get(id);
+        if (meta && meta.lastKnownModified) meta.lastSeenModified = meta.lastKnownModified;
+        const st = state.chatStatus.get(id);
+        if (st) st.unread = false;
+        renderTabs();
       };
 
       const createNewChat = async () => {
@@ -1307,6 +1439,12 @@
         ev.addEventListener('run.start', () => {
           state.live.running = true;
           setRunning(true);
+          const id = String(state.chatId || '');
+          if (id) {
+            const st = getOrInitChatStatus(id);
+            st.running = true;
+            renderTabs();
+          }
         });
         ev.addEventListener('cycle.start', (e) => {
           try {
@@ -1451,13 +1589,23 @@
           state.live.running = false;
           setRunning(false);
           stopThinking();
-          // Refresh tabs so title changes show up
+          const id = String(state.chatId || '');
+          if (id) {
+            const st = getOrInitChatStatus(id);
+            st.running = false;
+          }
           refreshChats().catch(() => {});
         });
         ev.addEventListener('run.error', (e) => {
           setRunning(false);
           stopThinking();
           console.error('run.error', e && e.data);
+          const id = String(state.chatId || '');
+          if (id) {
+            const st = getOrInitChatStatus(id);
+            st.running = false;
+            renderTabs();
+          }
         });
       };
 
@@ -2039,6 +2187,30 @@
               chat.save();
             }
             json(res, 200, { success: true, base_dir: chat.base_dir });
+          } catch (e) {
+            json(res, 500, { error: e.message || String(e) });
+          }
+          return true;
+        }
+
+        // POST /api/chat/:id/title { title?: string|null }
+        const titleMatch = pathname.match(
+          new RegExp('^' + apiBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/chat/([^/]+)/title$')
+        );
+        if (req.method === 'POST' && titleMatch) {
+          const chatId = decodeURIComponent(titleMatch[1]);
+          try {
+            const body = await readJson(req);
+            const chat = ChatSession.load(chatId);
+            if (!chat) {
+              json(res, 404, { error: 'not found' });
+              return true;
+            }
+            const raw = body.title;
+            const title = raw === null || raw === undefined ? null : String(raw).trim();
+            chat.title = title && title.length ? title : null;
+            chat.save();
+            json(res, 200, { success: true, title: chat.title });
           } catch (e) {
             json(res, 500, { error: e.message || String(e) });
           }
