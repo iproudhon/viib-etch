@@ -49,24 +49,15 @@
 
       const state = {
         chats: [],
+        // Currently active chat (tab)
         chat: null,
         chatId: null,
         models: [],
         selectedModel: null,
         selectedReasoningEffort: null,
         token: null,
-        running: false,
-        sse: null,
-        thinkingNode: null,
-        thinkingTimerId: null,
-        thinkingStartedAt: null,
-        live: {
-          running: false,
-          currentCycleId: null,
-          cycles: new Map(),
-          mdTimers: new Map(),
-          pendingUserEcho: null,
-        },
+        // Per-chat panes: each owns body/footer DOM + running/live state + SSE
+        panes: new Map(), // chatId -> PaneCtx
         collapsedByUser: new Set(),
         toolUi: new Map(),
         chatStatus: new Map(),
@@ -175,40 +166,52 @@
         scroller.scrollTop = scroller.scrollHeight;
       };
 
-      const ensureThinkingNode = () => {
-        if (state.thinkingNode && state.thinkingNode.parentNode) return state.thinkingNode;
+      const createLiveState = () => ({
+        running: false,
+        currentCycleId: null,
+        cycles: new Map(),
+        mdTimers: new Map(),
+        pendingUserEcho: null,
+      });
+
+      const ensureThinkingNode = (pane) => {
+        if (!pane) return null;
+        if (pane.thinkingNode && pane.thinkingNode.parentNode) return pane.thinkingNode;
         const wrap = document.createElement('div');
         wrap.style.margin = '10px 0';
         const span = document.createElement('span');
         span.className = 've-muted';
         wrap.appendChild(span);
-        body.appendChild(wrap);
-        state.thinkingNode = wrap;
+        pane.bodyEl.appendChild(wrap);
+        pane.thinkingNode = wrap;
         // Always ensure thinking node is last in the body
-        if (wrap.parentNode === body && body.lastChild !== wrap) {
-          body.appendChild(wrap);
+        if (wrap.parentNode === pane.bodyEl && pane.bodyEl.lastChild !== wrap) {
+          pane.bodyEl.appendChild(wrap);
         }
         return wrap;
       };
 
-      const removeThinkingNode = () => {
-        if (state.thinkingNode && state.thinkingNode.parentNode) {
-          state.thinkingNode.parentNode.removeChild(state.thinkingNode);
+      const removeThinkingNode = (pane) => {
+        if (!pane) return;
+        if (pane.thinkingNode && pane.thinkingNode.parentNode) {
+          pane.thinkingNode.parentNode.removeChild(pane.thinkingNode);
         }
-        state.thinkingNode = null;
+        pane.thinkingNode = null;
       };
 
-      const clearThinkingTimer = () => {
-        if (state.thinkingTimerId !== null) {
-          clearInterval(state.thinkingTimerId);
-          state.thinkingTimerId = null;
+      const clearThinkingTimer = (pane) => {
+        if (!pane) return;
+        if (pane.thinkingTimerId !== null && pane.thinkingTimerId !== undefined) {
+          clearInterval(pane.thinkingTimerId);
+          pane.thinkingTimerId = null;
         }
       };
 
-      const stopThinking = () => {
-        clearThinkingTimer();
-        removeThinkingNode();
-        state.thinkingStartedAt = null;
+      const stopThinking = (pane) => {
+        if (!pane) return;
+        clearThinkingTimer(pane);
+        removeThinkingNode(pane);
+        pane.thinkingStartedAt = null;
       };
 
       const formatElapsed = (ms) => {
@@ -219,20 +222,21 @@
         return `${m} minute${m === 1 ? '' : 's'}${s ? ' ' + s + ` second${s === 1 ? '' : 's'}` : ''}`;
       };
 
-      const startThinking = () => {
-        stopThinking();
-        state.thinkingStartedAt = Date.now();
-        const wrap = ensureThinkingNode();
+      const startThinking = (pane) => {
+        if (!pane) return;
+        stopThinking(pane);
+        pane.thinkingStartedAt = Date.now();
+        const wrap = ensureThinkingNode(pane);
         const span = wrap.querySelector('span');
         const tick = () => {
-          if (!state.thinkingStartedAt) return;
-          const elapsed = Date.now() - state.thinkingStartedAt;
+          if (!pane.thinkingStartedAt) return;
+          const elapsed = Date.now() - pane.thinkingStartedAt;
           if (span) span.textContent = `Thinking… ${formatElapsed(elapsed)}`;
         };
         tick();
-        state.thinkingTimerId = setInterval(tick, 1000);
+        pane.thinkingTimerId = setInterval(tick, 1000);
         // Ensure the latest user message and Thinking… line are visible
-        scrollToBottom(body);
+        scrollToBottom(pane.bodyEl);
       };
 
       const styleId = 'viib-etch-ui-style';
@@ -332,105 +336,204 @@
       top.appendChild(btnConfig);
       top.appendChild(tabs);
       top.appendChild(btnNew);
+      root.appendChild(top);
 
-      const body = document.createElement('div');
-      body.className = 've-body';
-
-      const footer = document.createElement('div');
-      footer.className = 've-footer';
-      
       const isMobile = () =>
         typeof navigator !== 'undefined' &&
         /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent || '');
 
-      // Row 1: Textarea
-      const row1 = document.createElement('div');
-      row1.className = 've-footer-row';
-      const ta = document.createElement('textarea');
-      ta.className = 've-textarea';
-      ta.placeholder = 'Message viib-etch…';
-      row1.appendChild(ta);
-      
-      // Row 2: Model label+selector, Reasoning label+selector, Send button (right-aligned)
-      const row2 = document.createElement('div');
-      row2.className = 've-footer-row';
-      
-      // Left side: controls that flex to fit
-      const controls = document.createElement('div');
-      controls.className = 've-footer-controls';
-      
-      const modelLabel = document.createElement('label');
-      modelLabel.textContent = 'Model';
-      const modelSel = document.createElement('select');
-      modelSel.className = 've-select';
-      
-      const reasoningLabel = document.createElement('label');
-      reasoningLabel.textContent = 'Reasoning';
-      const reasoningSel = document.createElement('select');
-      reasoningSel.className = 've-select';
+      // Placeholder area before any chat pane is activated
+      const placeholderBody = document.createElement('div');
+      placeholderBody.className = 've-body';
+      const placeholderFooter = document.createElement('div');
+      placeholderFooter.className = 've-footer';
+      placeholderFooter.style.display = 'none';
+      root.appendChild(placeholderBody);
+      root.appendChild(placeholderFooter);
 
-      const btnFolder = document.createElement('button');
-      btnFolder.className = 've-iconbtn ve-folder';
-      btnFolder.textContent = '📁';
-      btnFolder.title = 'Set base directory for this chat';
-      btnFolder.setAttribute('aria-label', 'Set base directory for this chat');
-      
-      controls.appendChild(modelLabel);
-      controls.appendChild(modelSel);
-      controls.appendChild(reasoningLabel);
-      controls.appendChild(reasoningSel);
-      controls.appendChild(btnFolder);
-      
-      // Right side: send button (fixed, right-aligned)
-      const actions = document.createElement('div');
-      actions.className = 've-actions';
-      const btnAction = document.createElement('button');
-      btnAction.className = 've-btn ve-primary';
-      btnAction.textContent = '▲';
-      btnAction.title = 'Send';
-      btnAction.setAttribute('aria-label', 'Send');
-      btnAction.style.minWidth = '44px';
-      actions.appendChild(btnAction);
-      
-      row2.appendChild(controls);
-      row2.appendChild(actions);
-      
-      footer.appendChild(row1);
-      footer.appendChild(row2);
-
-      root.appendChild(top);
-      root.appendChild(body);
-      root.appendChild(footer);
-
-      let jumpBtn = null;
-      let jumpBtnWrapper = null;
-      const ensureJumpBtn = () => {
-        if (jumpBtn) return jumpBtn;
-        jumpBtnWrapper = document.createElement('div');
-        jumpBtnWrapper.style.cssText = 'position:sticky;bottom:10px;display:flex;justify-content:flex-end;margin-top:10px;z-index:1;';
-        jumpBtn = document.createElement('button');
-        jumpBtn.className = 've-jump';
-        jumpBtn.textContent = '▼';
-        jumpBtn.style.cssText = 'position:static;margin:0;';
-        jumpBtn.addEventListener('click', () => scrollToBottom(body));
-        jumpBtnWrapper.appendChild(jumpBtn);
-        body.appendChild(jumpBtnWrapper);
-        return jumpBtn;
+      const detachBodyFooterIfPresent = (bodyEl, footerEl) => {
+        try { if (bodyEl && bodyEl.parentNode === root) root.removeChild(bodyEl); } catch {}
+        try { if (footerEl && footerEl.parentNode === root) root.removeChild(footerEl); } catch {}
       };
-      const hideJumpBtn = () => {
-        if (jumpBtnWrapper && jumpBtnWrapper.parentNode) {
-          jumpBtnWrapper.parentNode.removeChild(jumpBtnWrapper);
+
+      const attachBodyFooter = (bodyEl, footerEl) => {
+        // Always keep: top, then body, then footer
+        // Remove any existing body/footer currently attached (but keep top)
+        for (let i = root.childNodes.length - 1; i >= 0; i--) {
+          const n = root.childNodes[i];
+          if (n === top) continue;
+          try { root.removeChild(n); } catch {}
         }
-        jumpBtn = null;
-        jumpBtnWrapper = null;
+        root.appendChild(bodyEl);
+        root.appendChild(footerEl);
       };
 
-      let autoScrollArmed = true;
-      body.addEventListener('scroll', () => {
-        autoScrollArmed = shouldAutoScroll(body);
-        if (autoScrollArmed) hideJumpBtn();
-        else ensureJumpBtn();
-      });
+      const setActivePane = (pane) => {
+        if (pane && pane.bodyEl && pane.footerEl) {
+          attachBodyFooter(pane.bodyEl, pane.footerEl);
+          return;
+        }
+        attachBodyFooter(placeholderBody, placeholderFooter);
+      };
+
+      // PaneCtx creator (lazy): each chat has its own body/footer, running state, live state, SSE handle
+      const createPane = (chatId) => {
+        const id = String(chatId);
+        const bodyEl = document.createElement('div');
+        bodyEl.className = 've-body';
+
+        const footerEl = document.createElement('div');
+        footerEl.className = 've-footer';
+
+        const pane = {
+          chatId: id,
+          chat: null,
+          loaded: false,
+          bodyEl,
+          footerEl,
+          // footer controls:
+          ta: null,
+          modelSel: null,
+          reasoningSel: null,
+          btnFolder: null,
+          btnAction: null,
+          // per-pane scroll/jump state:
+          autoScrollArmed: true,
+          jumpBtn: null,
+          jumpBtnWrapper: null,
+          // per-pane running + SSE:
+          running: false,
+          sse: null,
+          // per-pane thinking:
+          thinkingNode: null,
+          thinkingTimerId: null,
+          thinkingStartedAt: null,
+          // per-pane live streaming state:
+          live: createLiveState(),
+        };
+
+        const ensureJumpBtn = () => {
+          if (pane.jumpBtn) return pane.jumpBtn;
+          pane.jumpBtnWrapper = document.createElement('div');
+          pane.jumpBtnWrapper.style.cssText = 'position:sticky;bottom:10px;display:flex;justify-content:flex-end;margin-top:10px;z-index:1;';
+          pane.jumpBtn = document.createElement('button');
+          pane.jumpBtn.className = 've-jump';
+          pane.jumpBtn.textContent = '▼';
+          pane.jumpBtn.style.cssText = 'position:static;margin:0;';
+          pane.jumpBtn.addEventListener('click', () => scrollToBottom(pane.bodyEl));
+          pane.jumpBtnWrapper.appendChild(pane.jumpBtn);
+          pane.bodyEl.appendChild(pane.jumpBtnWrapper);
+          return pane.jumpBtn;
+        };
+
+        const hideJumpBtn = () => {
+          if (pane.jumpBtnWrapper && pane.jumpBtnWrapper.parentNode) {
+            pane.jumpBtnWrapper.parentNode.removeChild(pane.jumpBtnWrapper);
+          }
+          pane.jumpBtn = null;
+          pane.jumpBtnWrapper = null;
+        };
+
+        pane.ensureJumpBtn = ensureJumpBtn;
+        pane.hideJumpBtn = hideJumpBtn;
+
+        pane.bodyEl.addEventListener('scroll', () => {
+          pane.autoScrollArmed = shouldAutoScroll(pane.bodyEl);
+          if (pane.autoScrollArmed) hideJumpBtn();
+          else ensureJumpBtn();
+        });
+
+        // Build footer controls (per pane)
+        const row1 = document.createElement('div');
+        row1.className = 've-footer-row';
+        const ta = document.createElement('textarea');
+        ta.className = 've-textarea';
+        ta.placeholder = 'Message viib-etch…';
+        row1.appendChild(ta);
+
+        const row2 = document.createElement('div');
+        row2.className = 've-footer-row';
+
+        const controls = document.createElement('div');
+        controls.className = 've-footer-controls';
+
+        const modelLabel = document.createElement('label');
+        modelLabel.textContent = 'Model';
+        const modelSel = document.createElement('select');
+        modelSel.className = 've-select';
+
+        const reasoningLabel = document.createElement('label');
+        reasoningLabel.textContent = 'Reasoning';
+        const reasoningSel = document.createElement('select');
+        reasoningSel.className = 've-select';
+
+        const btnFolder = document.createElement('button');
+        btnFolder.className = 've-iconbtn ve-folder';
+        btnFolder.textContent = '📁';
+        btnFolder.title = 'Set base directory for this chat';
+        btnFolder.setAttribute('aria-label', 'Set base directory for this chat');
+
+        controls.appendChild(modelLabel);
+        controls.appendChild(modelSel);
+        controls.appendChild(reasoningLabel);
+        controls.appendChild(reasoningSel);
+        controls.appendChild(btnFolder);
+
+        const actions = document.createElement('div');
+        actions.className = 've-actions';
+        const btnAction = document.createElement('button');
+        btnAction.className = 've-btn ve-primary';
+        btnAction.textContent = '▲';
+        btnAction.title = 'Send';
+        btnAction.setAttribute('aria-label', 'Send');
+        btnAction.style.minWidth = '44px';
+        actions.appendChild(btnAction);
+
+        row2.appendChild(controls);
+        row2.appendChild(actions);
+
+        footerEl.appendChild(row1);
+        footerEl.appendChild(row2);
+
+        pane.ta = ta;
+        pane.modelSel = modelSel;
+        pane.reasoningSel = reasoningSel;
+        pane.btnFolder = btnFolder;
+        pane.btnAction = btnAction;
+
+        // Wire per-pane controls (handlers reference functions defined later; safe because they're invoked on user interaction).
+        modelSel.addEventListener('change', () => setSelectedModel(modelSel.value));
+        reasoningSel.addEventListener('change', () => setSelectedReasoningEffort(reasoningSel.value));
+        btnFolder.addEventListener('click', () => openBaseDirModal(pane));
+        btnAction.addEventListener('click', () => {
+          if (pane.running) cancelRun(pane);
+          else sendMessage(pane);
+        });
+
+        ta.addEventListener('input', () => autoResizeTextarea(pane));
+        ta.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            // On mobile (iOS/Android/etc.), never treat Enter as send; always insert newline.
+            if (isMobile()) return;
+            if (e.shiftKey || e.ctrlKey || e.metaKey) return; // allow newline
+            // Desktop: Enter alone sends the message.
+            e.preventDefault();
+            if (!pane.running) sendMessage(pane);
+          }
+        });
+
+        return pane;
+      };
+
+      const getOrCreatePane = (chatId) => {
+        const id = String(chatId);
+        let p = state.panes.get(id);
+        if (!p) {
+          p = createPane(id);
+          state.panes.set(id, p);
+        }
+        return p;
+      };
 
       const toolUiKey = (toolCallId) => `tool:${String(toolCallId)}`;
       const reasoningKey = (idx) => `reasoning:${String(idx)}`;
@@ -503,20 +606,29 @@
         }
       };
 
-      const renderModels = () => {
-        modelSel.innerHTML = '';
+      const getActivePane = () => {
+        const id = state.chatId ? String(state.chatId) : '';
+        return id ? (state.panes.get(id) || null) : null;
+      };
+
+      const renderModels = (pane) => {
+        const selEl = pane && pane.modelSel ? pane.modelSel : null;
+        if (!selEl) return;
+        selEl.innerHTML = '';
         for (const m of state.models) {
           const opt = document.createElement('option');
           opt.value = m.name;
           opt.textContent = m.name;
-          modelSel.appendChild(opt);
+          selEl.appendChild(opt);
         }
         const sel = getSelectedModel();
-        if (sel) modelSel.value = sel;
+        if (sel) selEl.value = sel;
       };
 
-      const renderReasoningEffort = () => {
-        reasoningSel.innerHTML = '';
+      const renderReasoningEffort = (pane) => {
+        const selEl = pane && pane.reasoningSel ? pane.reasoningSel : null;
+        if (!selEl) return;
+        selEl.innerHTML = '';
         const options = [
           { value: 'default', label: 'Default' },
           { value: 'off', label: 'Off' },
@@ -529,20 +641,23 @@
           const el = document.createElement('option');
           el.value = opt.value;
           el.textContent = opt.label;
-          reasoningSel.appendChild(el);
+          selEl.appendChild(el);
         }
         const sel = getSelectedReasoningEffort();
-        reasoningSel.value = sel;
+        selEl.value = sel;
       };
 
-      const setRunning = (running) => {
-        state.running = !!running;
+      const setRunning = (pane, running) => {
+        if (!pane) return;
+        pane.running = !!running;
+        const btn = pane.btnAction;
+        if (!btn) return;
         // Single action button:
         // - idle: ▲ send
         // - running: ■ stop/cancel
-        btnAction.textContent = state.running ? '■' : '▲';
-        btnAction.title = state.running ? 'Stop' : 'Send';
-        btnAction.setAttribute('aria-label', state.running ? 'Stop' : 'Send');
+        btn.textContent = pane.running ? '■' : '▲';
+        btn.title = pane.running ? 'Stop' : 'Send';
+        btn.setAttribute('aria-label', pane.running ? 'Stop' : 'Send');
       };
 
       const groupToolOutputsForReplay = (chat) => {
@@ -821,15 +936,23 @@
         }
       };
 
-      const renderChat = async (chat, replayMode) => {
-        body.innerHTML = '';
-        hideJumpBtn();
+      const paneScopedKey = (pane, key) => {
+        const id = pane && pane.chatId ? String(pane.chatId) : '';
+        const k = String(key || '');
+        return id ? `${id}:${k}` : k;
+      };
+
+      const renderChat = async (pane, chat, replayMode) => {
+        const bodyEl = pane && pane.bodyEl ? pane.bodyEl : null;
+        if (!bodyEl) return;
+        bodyEl.innerHTML = '';
+        if (pane && typeof pane.hideJumpBtn === 'function') pane.hideJumpBtn();
 
         if (!chat) {
           const empty = document.createElement('div');
           empty.className = 've-muted';
           empty.textContent = 'No chat selected.';
-          body.appendChild(empty);
+          bodyEl.appendChild(empty);
           return;
         }
 
@@ -844,7 +967,7 @@
             const wrap = document.createElement('div');
             wrap.className = 've-msg ve-user';
             wrap.innerHTML = `<div class="ve-bubble"><pre>${escapeHtml(msg.content || '')}</pre></div>`;
-            body.appendChild(wrap);
+            bodyEl.appendChild(wrap);
             continue;
           }
 
@@ -863,7 +986,7 @@
             wrap.className = 've-msg ve-assistant';
 
             // Combined assistant block (response + reasoning in one) 
-            const rk = responseKey(i);
+            const rk = paneScopedKey(pane, responseKey(i));
             const isCollapsed = isCollapsedByUser(rk);
             const block = document.createElement('div');
             block.className = 've-assistant-block' + (isCollapsed ? ' collapsed' : '');
@@ -962,7 +1085,7 @@
               }
             }
 
-            body.appendChild(wrap);
+            bodyEl.appendChild(wrap);
 
             // Render markdown (lazy-ish but minimal)
             const respMd = wrap.querySelector('[data-md="response"]');
@@ -980,17 +1103,18 @@
         }
 
         // replay: scroll to bottom
-        scrollToBottom(body);
-        autoScrollArmed = true;
+        scrollToBottom(bodyEl);
+        if (pane) pane.autoScrollArmed = true;
       };
 
       // ----------------------------
       // Live incremental rendering
       // ----------------------------
-      const liveEnsureAssistantCycle = (cycleId) => {
+      const liveEnsureAssistantCycle = (pane, cycleId) => {
+        if (!pane || !pane.live) return null;
         const cid = String(cycleId || '');
         if (!cid) return null;
-        let c = state.live.cycles.get(cid);
+        let c = pane.live.cycles.get(cid);
         if (c) return c;
 
         // Create a new assistant block in the stream
@@ -1026,7 +1150,7 @@
         const toolsWrapEl = document.createElement('div');
         wrap.appendChild(toolsWrapEl);
 
-        body.appendChild(wrap);
+        pane.bodyEl.appendChild(wrap);
 
         const respMdEl = respDiv;
 
@@ -1050,14 +1174,14 @@
           const wasCollapsed = block.classList.contains('collapsed');
           block.classList.toggle('collapsed');
           // If user explicitly opened while running, treat as pinned (don't auto-collapse).
-          if (state.live.running && wasCollapsed) c.reasoningPinnedOpen = true;
+          if (pane.live.running && wasCollapsed) c.reasoningPinnedOpen = true;
         });
-        state.live.cycles.set(cid, c);
+        pane.live.cycles.set(cid, c);
         return c;
       };
 
-      const liveEnsureReasoningPanel = (cycleId) => {
-        const c = liveEnsureAssistantCycle(cycleId);
+      const liveEnsureReasoningPanel = (pane, cycleId) => {
+        const c = liveEnsureAssistantCycle(pane, cycleId);
         if (!c) return null;
         if (c.reasonDetails && c.reasonMdEl) return c;
 
@@ -1078,42 +1202,44 @@
         return c;
       };
 
-      const liveAutoScrollIfArmed = () => {
-        if (autoScrollArmed) {
-          scrollToBottom(body);
+      const liveAutoScrollIfArmed = (pane) => {
+        if (!pane) return;
+        if (pane.autoScrollArmed) {
+          scrollToBottom(pane.bodyEl);
         } else {
-          ensureJumpBtn();
+          if (typeof pane.ensureJumpBtn === 'function') pane.ensureJumpBtn();
         }
       };
 
-      const scheduleMarkdownRender = (key, mdText, targetEl) => {
-        if (!targetEl) return;
+      const scheduleMarkdownRender = (pane, key, mdText, targetEl) => {
+        if (!pane || !pane.live || !targetEl) return;
         // Throttle to avoid hammering server during streaming
         const k = String(key);
-        const existing = state.live.mdTimers.get(k);
+        const existing = pane.live.mdTimers.get(k);
         if (existing) return;
         const timer = setTimeout(async () => {
-          state.live.mdTimers.delete(k);
+          pane.live.mdTimers.delete(k);
           const html = (await renderMarkdownViaServer(mdText)) || renderMarkdownFallback(mdText);
           targetEl.innerHTML = html;
-          liveAutoScrollIfArmed();
+          liveAutoScrollIfArmed(pane);
         }, 250);
-        state.live.mdTimers.set(k, timer);
+        pane.live.mdTimers.set(k, timer);
       };
 
-      const liveAppendUserMessage = (content) => {
+      const liveAppendUserMessage = (pane, content) => {
+        if (!pane) return;
         const wrap = document.createElement('div');
         wrap.className = 've-msg ve-user';
         wrap.innerHTML = `<div class="ve-bubble"><pre>${escapeHtml(content || '')}</pre></div>`;
-        body.appendChild(wrap);
-        liveAutoScrollIfArmed();
-        if (state.running) {
-          startThinking();
+        pane.bodyEl.appendChild(wrap);
+        liveAutoScrollIfArmed(pane);
+        if (pane.running) {
+          startThinking(pane);
         }
       };
 
-      const liveEnsureToolBlock = (cycleId, toolCallId, name, args) => {
-        const c = liveEnsureAssistantCycle(cycleId);
+      const liveEnsureToolBlock = (pane, cycleId, toolCallId, name, args) => {
+        const c = liveEnsureAssistantCycle(pane, cycleId);
         if (!c) return null;
         const tid = String(toolCallId || '');
         if (!tid) return null;
@@ -1152,7 +1278,7 @@
         return tb;
       };
 
-      const liveUpdateToolBlock = async (tb) => {
+      const liveUpdateToolBlock = async (pane, tb) => {
         if (!tb || !tb.bodyEl) return;
         const name = tb.name;
         // Streaming terminal output
@@ -1177,7 +1303,7 @@
             const outEl = tb.bodyEl.querySelector('[data-autoscroll="1"]');
             if (outEl) outEl.scrollTop = outEl.scrollHeight;
           } catch {}
-          liveAutoScrollIfArmed();
+          liveAutoScrollIfArmed(pane);
           return;
         }
 
@@ -1196,7 +1322,7 @@
             name: tb.name,
             content: typeof tb.result === 'string' ? tb.result : JSON.stringify(tb.result),
           };
-          const { title, bodyHtml } = await renderTool(state.chat || { data: {} }, fakeTc, fakeToolMsg);
+          const { title, bodyHtml } = await renderTool((pane && pane.chat) ? pane.chat : (state.chat || { data: {} }), fakeTc, fakeToolMsg);
           if (tb.detailsEl && title) {
             const summaryEl = tb.detailsEl.querySelector('summary');
             if (summaryEl) summaryEl.textContent = title;
@@ -1207,7 +1333,7 @@
           if (tb.detailsEl && tb.name === 'run_terminal_cmd') {
             tb.detailsEl.open = false;
           }
-          liveAutoScrollIfArmed();
+          liveAutoScrollIfArmed(pane);
           return;
         }
       };
@@ -1229,6 +1355,12 @@
       const deleteChatId = async (chatId) => {
         const id = String(chatId);
         await apiFetch(`/chat/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        // Clean up any cached pane/SSE for this chat
+        try {
+          const p = state.panes.get(id);
+          if (p) closeSSE(p);
+          state.panes.delete(id);
+        } catch {}
         // If we deleted current chat, switch to next available
         const wasCurrent = state.chatId === id;
         await refreshChats();
@@ -1237,7 +1369,8 @@
           state.chat = null;
           if (state.chats.length > 0) await openChatId(state.chats[0].id);
           else {
-            body.innerHTML = `<div class="ve-muted">No chats.</div>`;
+            setActivePane(null);
+            placeholderBody.innerHTML = `<div class="ve-muted">No chats.</div>`;
           }
         }
       };
@@ -1296,14 +1429,18 @@
         }));
         menu.appendChild(makeItem('Refresh', () => {
           if (state.chatId === id) {
-            openChatId(id).catch((e) => alert(String(e && e.message ? e.message : e)));
+            openChatId(id, { forceReload: true }).catch((e) => alert(String(e && e.message ? e.message : e)));
           } else {
             refreshChats().catch((e) => alert(String(e && e.message ? e.message : e)));
           }
         }));
         menu.appendChild(makeItem('Set directory', () => {
-          state.chatId = id;
-          openBaseDirModal();
+          openChatId(id)
+            .then(() => {
+              const p = getActivePane();
+              if (p) openBaseDirModal(p);
+            })
+            .catch((e) => alert(String(e && e.message ? e.message : e)));
         }));
         menu.appendChild(makeItem('Delete…', () => {
           if (!confirm('Delete this chat?')) return;
@@ -1323,17 +1460,51 @@
 
       const refreshModels = async () => {
         state.models = await apiFetch('/models');
-        renderModels();
+        // Update selectors in any created panes (lazy panes will be updated when created/activated).
+        for (const p of state.panes.values()) {
+          renderModels(p);
+        }
+        const ap = getActivePane();
+        if (ap) renderModels(ap);
       };
 
-      const openChatId = async (chatId) => {
+      const openChatId = async (chatId, opts) => {
         const id = String(chatId);
-        if (state.chat && state.chatId === id) return;
+        const forceReload = !!(opts && opts.forceReload);
+        if (!forceReload && state.chatId === id && getActivePane()) {
+          // Already active; nothing to do.
+          return;
+        }
+
+        const prev = getActivePane();
+        if (prev && String(prev.chatId) !== id) {
+          // Policy: keep SSE only for active or running panes.
+          if (!(prev.running || (prev.live && prev.live.running))) closeSSE(prev);
+          stopThinking(prev);
+        }
         state.chatId = id;
         localStorage.setItem(options.chatStorageKey, state.chatId);
         renderTabs();
-        state.chat = await apiFetch(`/chat/${encodeURIComponent(state.chatId)}`);
-        await renderChat(state.chat, true);
+
+        const pane = getOrCreatePane(id);
+        setActivePane(pane);
+        renderModels(pane);
+        renderReasoningEffort(pane);
+        autoResizeTextarea(pane);
+
+        if (!pane.loaded || forceReload) {
+          pane.chat = await apiFetch(`/chat/${encodeURIComponent(id)}`);
+          pane.loaded = true;
+          pane.live = createLiveState();
+          state.chat = pane.chat;
+          await renderChat(pane, pane.chat, true);
+        } else {
+          state.chat = pane.chat || null;
+          // Pane already has DOM content; just ensure we're scrolled to bottom.
+          try { scrollToBottom(pane.bodyEl); } catch {}
+        }
+
+        ensureSSE(pane);
         const meta = state.chatMeta.get(id);
         if (meta && meta.lastKnownModified) meta.lastSeenModified = meta.lastKnownModified;
         const st = state.chatStatus.get(id);
@@ -1353,8 +1524,8 @@
         await refreshChats();
         if (res && res.id) await openChatId(res.id);
       };
-      const openBaseDirModal = () => {
-        if (!state.chatId) {
+      const openBaseDirModal = (pane) => {
+        if (!pane || !pane.chatId) {
           alert('No chat selected.');
           return;
         }
@@ -1379,7 +1550,7 @@
         document.body.appendChild(backdrop);
 
         const baseDirInput = modal.querySelector('[data-basedir="1"]');
-        if (baseDirInput) baseDirInput.value = (state.chat && state.chat.base_dir) ? String(state.chat.base_dir) : '';
+        if (baseDirInput) baseDirInput.value = (pane.chat && pane.chat.base_dir) ? String(pane.chat.base_dir) : '';
 
         const close = () => {
           try { document.body.removeChild(backdrop); } catch {}
@@ -1388,13 +1559,18 @@
         const save = async () => {
           const val = baseDirInput ? String(baseDirInput.value || '').trim() : '';
           const payload = { base_dir: val ? val : null };
-          await apiFetch(`/chat/${encodeURIComponent(state.chatId)}/base_dir`, {
+          await apiFetch(`/chat/${encodeURIComponent(pane.chatId)}/base_dir`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(payload),
           });
-          // Refresh current chat (so state.chat.base_dir is updated for New Chat inheritance)
-          state.chat = await apiFetch(`/chat/${encodeURIComponent(state.chatId)}`);
+          // Refresh loaded chat (so base_dir is updated for New Chat inheritance)
+          if (pane.loaded) {
+            pane.chat = await apiFetch(`/chat/${encodeURIComponent(pane.chatId)}`);
+            if (String(state.chatId || '') === String(pane.chatId || '')) {
+              state.chat = pane.chat;
+            }
+          }
           close();
         };
 
@@ -1419,27 +1595,28 @@
         modal.querySelector('main').appendChild(btnSave);
       };
 
-      const closeSSE = () => {
-        if (state.sse) {
-          try { state.sse.close(); } catch {}
-          state.sse = null;
+      const closeSSE = (pane) => {
+        if (!pane) return;
+        if (pane.sse) {
+          try { pane.sse.close(); } catch {}
+          pane.sse = null;
         }
       };
 
-      const ensureSSE = () => {
-        closeSSE();
-        if (!state.chatId) return;
+      const ensureSSE = (pane) => {
+        if (!pane || !pane.chatId) return;
+        closeSSE(pane);
         const t = getToken();
         const url =
           (options.apiBase || '').replace(/\/+$/, '') +
-          `/chat/${encodeURIComponent(state.chatId)}/events` +
+          `/chat/${encodeURIComponent(pane.chatId)}/events` +
           (t ? `?token=${encodeURIComponent(t)}` : '');
         const ev = new EventSource(url);
-        state.sse = ev;
+        pane.sse = ev;
         ev.addEventListener('run.start', () => {
-          state.live.running = true;
-          setRunning(true);
-          const id = String(state.chatId || '');
+          pane.live.running = true;
+          setRunning(pane, true);
+          const id = String(pane.chatId || '');
           if (id) {
             const st = getOrInitChatStatus(id);
             st.running = true;
@@ -1449,37 +1626,37 @@
         ev.addEventListener('cycle.start', (e) => {
           try {
             const data = JSON.parse(e.data || '{}');
-            state.live.currentCycleId = data.cycle_id || null;
-            liveEnsureAssistantCycle(state.live.currentCycleId);
-            liveAutoScrollIfArmed();
+            pane.live.currentCycleId = data.cycle_id || null;
+            liveEnsureAssistantCycle(pane, pane.live.currentCycleId);
+            liveAutoScrollIfArmed(pane);
           } catch {}
         });
         ev.addEventListener('chat.user', (e) => {
           try {
             const data = JSON.parse(e.data || '{}');
             const content = String(data.content || '');
-            if (state.live.pendingUserEcho && state.live.pendingUserEcho === content) {
-              state.live.pendingUserEcho = null;
+            if (pane.live.pendingUserEcho && pane.live.pendingUserEcho === content) {
+              pane.live.pendingUserEcho = null;
               return;
             }
-            stopThinking();
-            liveAppendUserMessage(content);
+            stopThinking(pane);
+            liveAppendUserMessage(pane, content);
           } catch {}
         });
         ev.addEventListener('assistant.reasoning.start', (e) => {
           try {
             const data = JSON.parse(e.data || '{}');
-            const c = liveEnsureReasoningPanel(data.cycle_id || state.live.currentCycleId);
+            const c = liveEnsureReasoningPanel(pane, data.cycle_id || pane.live.currentCycleId);
             if (!c) return;
             if (c.respDetails) c.respDetails.classList.remove('collapsed');
-            liveAutoScrollIfArmed();
+            liveAutoScrollIfArmed(pane);
           } catch {}
         });
         ev.addEventListener('assistant.reasoning.delta', (e) => {
           try {
             const data = JSON.parse(e.data || '{}');
-            stopThinking();
-            const c = liveEnsureReasoningPanel(data.cycle_id || state.live.currentCycleId);
+            stopThinking(pane);
+            const c = liveEnsureReasoningPanel(pane, data.cycle_id || pane.live.currentCycleId);
             if (!c) return;
             c.reasonText += String(data.delta || '');
             if (c.respDetails) {
@@ -1488,74 +1665,74 @@
             if (c.respPreviewEl) {
               c.respPreviewEl.textContent = firstLine(c.respText || c.reasonText || '…') || '…';
             }
-            scheduleMarkdownRender(`reason:${data.cycle_id}`, c.reasonText, c.reasonMdEl);
+            scheduleMarkdownRender(pane, `reason:${data.cycle_id}`, c.reasonText, c.reasonMdEl);
           } catch {}
         });
         ev.addEventListener('assistant.reasoning.done', (e) => {
           try {
             const data = JSON.parse(e.data || '{}');
-            const c = state.live.cycles.get(String(data.cycle_id || ''));
+            const c = pane.live.cycles.get(String(data.cycle_id || ''));
             if (!c) return;
             // render final markdown
-            scheduleMarkdownRender(`reason:${data.cycle_id}`, c.reasonText, c.reasonMdEl);
+            scheduleMarkdownRender(pane, `reason:${data.cycle_id}`, c.reasonText, c.reasonMdEl);
           } catch {}
         });
         ev.addEventListener('assistant.response.start', (e) => {
           try {
             const data = JSON.parse(e.data || '{}');
-            const c = liveEnsureAssistantCycle(data.cycle_id || state.live.currentCycleId);
+            const c = liveEnsureAssistantCycle(pane, data.cycle_id || pane.live.currentCycleId);
             if (!c) return;
             c.respDetails.classList.remove('collapsed');
-            liveAutoScrollIfArmed();
+            liveAutoScrollIfArmed(pane);
           } catch {}
         });
         ev.addEventListener('assistant.response.delta', (e) => {
           try {
             const data = JSON.parse(e.data || '{}');
-            stopThinking();
-            const c = liveEnsureAssistantCycle(data.cycle_id || state.live.currentCycleId);
+            stopThinking(pane);
+            const c = liveEnsureAssistantCycle(pane, data.cycle_id || pane.live.currentCycleId);
             if (!c) return;
             c.respText += String(data.delta || '');
             if (c.respPreviewEl) {
               c.respPreviewEl.textContent = firstLine(c.respText || c.reasonText || '(streaming…)') || '(streaming…)';
             }
-            scheduleMarkdownRender(`resp:${data.cycle_id}`, c.respText, c.respMdEl);
+            scheduleMarkdownRender(pane, `resp:${data.cycle_id}`, c.respText, c.respMdEl);
           } catch {}
         });
         ev.addEventListener('assistant.response.done', (e) => {
           try {
             const data = JSON.parse(e.data || '{}');
-            const c = state.live.cycles.get(String(data.cycle_id || ''));
+            const c = pane.live.cycles.get(String(data.cycle_id || ''));
             if (!c) return;
-            scheduleMarkdownRender(`resp:${data.cycle_id}`, c.respText, c.respMdEl);
+            scheduleMarkdownRender(pane, `resp:${data.cycle_id}`, c.respText, c.respMdEl);
           } catch {}
         });
         ev.addEventListener('tool.start', (e) => {
           try {
             const data = JSON.parse(e.data || '{}');
-            stopThinking();
-            const tb = liveEnsureToolBlock(data.cycle_id || state.live.currentCycleId, data.id, data.name, data.args);
+            stopThinking(pane);
+            const tb = liveEnsureToolBlock(pane, data.cycle_id || pane.live.currentCycleId, data.id, data.name, data.args);
             if (!tb) return;
             tb.running = true;
             // Title will be set once result is available via renderTool; avoid temporary "Running" suffix.
-            liveAutoScrollIfArmed();
+            liveAutoScrollIfArmed(pane);
           } catch {}
         });
         ev.addEventListener('tool.data', (e) => {
           try {
             const data = JSON.parse(e.data || '{}');
-            stopThinking();
-            const tb = liveEnsureToolBlock(data.cycle_id || state.live.currentCycleId, data.id, data.name, null);
+            stopThinking(pane);
+            const tb = liveEnsureToolBlock(pane, data.cycle_id || pane.live.currentCycleId, data.id, data.name, null);
             if (!tb) return;
             const d = data.data || {};
             if (d.phase === 'stream' && typeof d.data === 'string') {
               tb.outText += d.data;
-              liveUpdateToolBlock(tb).catch(() => {});
+              liveUpdateToolBlock(pane, tb).catch(() => {});
               return;
             }
             if (d.phase === 'result') {
               tb.result = d.result;
-              liveUpdateToolBlock(tb).catch(() => {});
+              liveUpdateToolBlock(pane, tb).catch(() => {});
               return;
             }
           } catch {}
@@ -1563,15 +1740,15 @@
         ev.addEventListener('tool.end', (e) => {
           try {
             const data = JSON.parse(e.data || '{}');
-            stopThinking();
-            const c = state.live.cycles.get(String(data.cycle_id || '')) || null;
+            stopThinking(pane);
+            const c = pane.live.cycles.get(String(data.cycle_id || '')) || null;
             const tb = c ? c.toolBlocks.get(String(data.id || '')) : null;
             if (!tb) return;
             tb.running = false;
             // If backend provided an enriched final result on tool.end, update and re-render.
             if (data && data.result !== undefined && data.result !== null) {
               tb.result = data.result;
-              liveUpdateToolBlock(tb).catch(() => {});
+              liveUpdateToolBlock(pane, tb).catch(() => {});
             }
             // For run_terminal_cmd, explicitly mark as Ran and collapse once done.
             if (tb.name === 'run_terminal_cmd' && tb.detailsEl) {
@@ -1582,65 +1759,73 @@
               // Other tools: collapse once done unless user left it open intentionally
               if (!tb.openedByUser && tb.detailsEl) tb.detailsEl.open = false;
             }
-            liveAutoScrollIfArmed();
+            liveAutoScrollIfArmed(pane);
           } catch {}
         });
         ev.addEventListener('run.done', async () => {
-          state.live.running = false;
-          setRunning(false);
-          stopThinking();
-          const id = String(state.chatId || '');
+          pane.live.running = false;
+          setRunning(pane, false);
+          stopThinking(pane);
+          const id = String(pane.chatId || '');
           if (id) {
             const st = getOrInitChatStatus(id);
             st.running = false;
           }
           refreshChats().catch(() => {});
+          // If this pane is not active anymore, disconnect after run finishes (policy: active or running only)
+          if (String(state.chatId || '') !== String(pane.chatId || '')) {
+            closeSSE(pane);
+          }
         });
         ev.addEventListener('run.error', (e) => {
-          setRunning(false);
-          stopThinking();
+          setRunning(pane, false);
+          stopThinking(pane);
           console.error('run.error', e && e.data);
-          const id = String(state.chatId || '');
+          const id = String(pane.chatId || '');
           if (id) {
             const st = getOrInitChatStatus(id);
             st.running = false;
             renderTabs();
           }
+          if (String(state.chatId || '') !== String(pane.chatId || '')) {
+            closeSSE(pane);
+          }
         });
       };
 
-      const sendMessage = async () => {
-        const text = ta.value;
-        if (!String(text || '').trim() || !state.chatId) return;
+      const sendMessage = async (pane) => {
+        if (!pane || !pane.chatId || !pane.ta) return;
+        const text = pane.ta.value;
+        if (!String(text || '').trim()) return;
         const model_name = getSelectedModel();
         const reasoning_effort = getSelectedReasoningEffort();
         const params = { message: text, model_name };
         if (reasoning_effort && reasoning_effort !== 'default') {
           params.reasoning_effort = reasoning_effort;
         }
-        setRunning(true);
-        ensureSSE();
-        ta.value = '';
-        autoResizeTextarea();
+        setRunning(pane, true);
+        ensureSSE(pane);
+        pane.ta.value = '';
+        autoResizeTextarea(pane);
         // Optimistically show the user message immediately during live.
-        state.live.pendingUserEcho = String(text);
-        liveAppendUserMessage(String(text));
+        pane.live.pendingUserEcho = String(text);
+        liveAppendUserMessage(pane, String(text));
         try {
-          await apiFetch(`/chat/${encodeURIComponent(state.chatId)}/send`, {
+          await apiFetch(`/chat/${encodeURIComponent(pane.chatId)}/send`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(params),
           });
         } catch (e) {
-          setRunning(false);
+          setRunning(pane, false);
           alert(String(e && e.message ? e.message : e));
         }
       };
 
-      const cancelRun = async () => {
-        if (!state.chatId) return;
+      const cancelRun = async (pane) => {
+        if (!pane || !pane.chatId) return;
         try {
-          await apiFetch(`/chat/${encodeURIComponent(state.chatId)}/cancel`, {
+          await apiFetch(`/chat/${encodeURIComponent(pane.chatId)}/cancel`, {
             method: 'POST',
           });
         } catch (e) {
@@ -1684,7 +1869,7 @@
             const newToken = tokenInput.value;
             if (newToken !== getToken()) {
               setToken(newToken);
-              ensureSSE();
+              reconnectSSEForActiveOrRunningPanes();
             }
           }
           if (apiBaseInput) {
@@ -1693,7 +1878,8 @@
               options.apiBase = newApiBase;
               refreshModels().catch(() => {});
               refreshChats().catch(() => {});
-              ensureSSE();
+              // Reconnect SSE for active/running panes with the new apiBase
+              reconnectSSEForActiveOrRunningPanes();
             }
           }
           try { document.body.removeChild(backdrop); } catch {}
@@ -1705,29 +1891,24 @@
 
         tokenInput.addEventListener('change', () => {
           setToken(tokenInput.value);
-          // Reconnect SSE with new token
-          ensureSSE();
+          // Reconnect SSE with new token for active/running panes
+          reconnectSSEForActiveOrRunningPanes();
         });
         apiBaseInput.addEventListener('change', () => {
           options.apiBase = String(apiBaseInput.value || '/api');
           // Refresh data using new base
           refreshModels().catch(() => {});
           refreshChats().catch(() => {});
-          ensureSSE();
+          reconnectSSEForActiveOrRunningPanes();
         });
       };
 
       btnConfig.addEventListener('click', openConfigModal);
       btnNew.addEventListener('click', () => createNewChat().catch((e) => alert(String(e.message || e))));
-      modelSel.addEventListener('change', () => setSelectedModel(modelSel.value));
-      reasoningSel.addEventListener('change', () => setSelectedReasoningEffort(reasoningSel.value));
-      btnFolder.addEventListener('click', openBaseDirModal);
-      btnAction.addEventListener('click', () => {
-        if (state.running) cancelRun();
-        else sendMessage();
-      });
 
-      const autoResizeTextarea = () => {
+      const autoResizeTextarea = (pane) => {
+        if (!pane || !pane.ta) return;
+        const ta = pane.ta;
         // Reset height to measure scrollHeight from the intrinsic content size
         ta.style.height = 'auto';
         const maxPx = Math.floor(window.innerHeight * 0.5);
@@ -1735,37 +1916,28 @@
         ta.style.height = next + 'px';
       };
 
-      ta.addEventListener('input', autoResizeTextarea);
-      // Initialize height
-      autoResizeTextarea();
-
-      ta.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          // On mobile (iOS/Android/etc.), never treat Enter as send; always insert newline.
-          if (isMobile()) return;
-
-          if (e.shiftKey || e.ctrlKey || e.metaKey) {
-            // Shift+Enter, Ctrl+Enter, or Cmd+Enter: allow newline (default behavior)
-            return;
+      const reconnectSSEForActiveOrRunningPanes = () => {
+        for (const p of state.panes.values()) closeSSE(p);
+        const activeId = String(state.chatId || '');
+        for (const p of state.panes.values()) {
+          if (!p || !p.chatId) continue;
+          if (String(p.chatId) === activeId || p.running || (p.live && p.live.running)) {
+            ensureSSE(p);
           }
-
-          // Desktop: Enter alone sends the message.
-          e.preventDefault();
-          if (!state.running) sendMessage();
         }
-      });
+      };
 
       // Initial load
       (async () => {
         try {
           // If token isn't set, prompt immediately (CLI/server enforces auth).
           if (!getToken()) {
-            body.innerHTML = `<div class="ve-muted">Token required. Click ⚙ and paste a token from <code>.viib-etch-tokens</code>.</div>`;
+            setActivePane(null);
+            placeholderBody.innerHTML = `<div class="ve-muted">Token required. Click ⚙ and paste a token from <code>.viib-etch-tokens</code>.</div>`;
             openConfigModal();
             return;
           }
           await refreshModels();
-          renderReasoningEffort();
           await refreshChats();
           const remembered = localStorage.getItem(options.chatStorageKey);
           if (remembered) {
@@ -1773,16 +1945,18 @@
           } else if (state.chats.length > 0) {
             await openChatId(state.chats[0].id);
           }
-          ensureSSE();
+          const ap = getActivePane();
+          if (ap) ensureSSE(ap);
         } catch (e) {
-          body.innerHTML = `<div class="ve-muted">Failed to load: ${escapeHtml(e && e.message ? e.message : String(e))}</div>`;
+          setActivePane(null);
+          placeholderBody.innerHTML = `<div class="ve-muted">Failed to load: ${escapeHtml(e && e.message ? e.message : String(e))}</div>`;
         }
       })();
 
-      setRunning(false);
+      // Ensure placeholder (no active chat) shows an idle state
       return {
         destroy: () => {
-          closeSSE();
+          for (const p of state.panes.values()) closeSSE(p);
           root.innerHTML = '';
         },
       };
