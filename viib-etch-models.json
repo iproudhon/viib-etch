@@ -102,6 +102,6 @@
         "model": "gemini-3-pro-image-preview",
         "baseUrl": "https://generativelanguage.googleapis.com",
         "api_key_file": "/data/sjung/src/viib-etch/.google-api-key",
-        "reasoning_effort": "off"
+        "reasoning_effort": "high"
     }
 ]
