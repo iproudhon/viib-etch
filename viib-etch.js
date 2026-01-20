@@ -294,6 +294,61 @@ class ChatSession {
     return id;
   }
 
+  /**
+   * cleanupImages()
+   *
+   * Removes images that are not referenced by any persisted message content.
+   * This is intentionally NOT called automatically by addImage()/save() because
+   * some workflows (like "attach then later generate") temporarily store images
+   * before they are referenced by a message.
+   *
+   * Returns { removedIds, keptIds }.
+   */
+  cleanupImages() {
+    const images = this._ensureImagesMap();
+    const used = new Set();
+
+    const addId = (v) => {
+      const s = (v === null || v === undefined) ? '' : String(v);
+      if (s) used.add(s);
+    };
+    const addIds = (arr) => {
+      const a = Array.isArray(arr) ? arr : [];
+      for (const v of a) addId(v);
+    };
+
+    for (const msg of Array.isArray(this.messages) ? this.messages : []) {
+      if (!msg || typeof msg !== 'object') continue;
+
+      // Back-compat: some formats may store these at the top level.
+      addIds(msg.images);
+      addIds(msg.reference_images);
+      addIds(msg.reference_image_ids);
+
+      const c = msg.content;
+      if (!c || typeof c !== 'object') continue;
+
+      // Current UI format: { type:'image'|'image_prompt', reference_images:[...], images:[...] }
+      addIds(c.images);
+      addIds(c.reference_images);
+      addIds(c.reference_image_ids);
+    }
+
+    const removedIds = [];
+    const keptIds = [];
+    for (const id of Object.keys(images)) {
+      if (used.has(String(id))) keptIds.push(String(id));
+      else {
+        removedIds.push(String(id));
+        try { delete images[id]; } catch {}
+      }
+    }
+
+    // Persist cleanup result in-memory; caller decides when to save().
+    this.images = images;
+    return { removedIds, keptIds };
+  }
+
   getImage(id) {
     const images = this._ensureImagesMap();
     const key = (id === null || id === undefined) ? '' : String(id);

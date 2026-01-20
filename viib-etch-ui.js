@@ -80,7 +80,11 @@
         state.selectedModel = String(m || '');
         localStorage.setItem(options.modelStorageKey, state.selectedModel);
         // Update send button icon/behavior for active pane.
-        try { updateActionButton(getActivePane()); } catch {}
+        try {
+          const p = getActivePane();
+          updateActionButton(p);
+          updateImageAttachControls(p);
+        } catch {}
       };
 
       const getSelectedReasoningEffort = () =>
@@ -138,6 +142,12 @@
       const renderMarkdownFallback = (md) => {
         // Minimal fallback: escaped <pre>. Server renderer provides full markdown.
         return `<pre class="ve-pre">${escapeHtml(md || '')}</pre>`;
+      };
+
+      const apiBaseUrl = () => (options.apiBase || '').replace(/\/+$/, '');
+      const imageDataUrl = (chatId, imageId) => {
+        const tok = encodeURIComponent(getToken() || '');
+        return `${apiBaseUrl()}/chat/${encodeURIComponent(String(chatId))}/images/${encodeURIComponent(String(imageId))}/data?token=${tok}`;
       };
 
       // Parse current todos array from todo_write tool result.
@@ -547,10 +557,15 @@
           .ve-footer{position:sticky;bottom:0;z-index:5;border-top:1px solid rgba(17,24,39,0.10);background:#ffffff;padding:10px 12px;display:flex;flex-direction:column;gap:8px;}
           .ve-footer-row{display:flex;gap:10px;align-items:flex-end;}
           .ve-footer-row:first-child{flex:1;}
-          .ve-footer-row:last-child{flex:0 0 auto;justify-content:space-between;}
+          .ve-footer-row.ve-footer-actions{flex:0 0 auto;justify-content:space-between;}
           .ve-footer-controls{display:flex;gap:10px;align-items:center;flex:1 1 0;min-width:0;}
           .ve-footer-controls label{white-space:nowrap;font-size:12px;opacity:0.75;flex-shrink:0;}
           .ve-footer-controls .ve-select{flex:0 1 auto;min-width:0;font-size:13px;max-width:200px;}
+          .ve-attach-thumbs{display:flex;flex-wrap:wrap;gap:8px;margin-top:-2px;}
+          .ve-attach-thumb{position:relative;display:inline-flex;}
+          .ve-attach-thumb img{display:block;border-radius:10px;border:1px solid rgba(17,24,39,0.12);background:#fff;object-fit:contain;cursor:pointer;}
+          .ve-attach-thumb button{position:absolute;top:-7px;right:-7px;width:18px;height:18px;border-radius:999px;border:1px solid rgba(17,24,39,0.14);background:#ffffff;color:#111827;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:12px;line-height:1;padding:0;box-shadow:0 1px 2px rgba(0,0,0,0.10);}
+          .ve-attach-thumb button:hover{background:#f3f4f6;}
           /* Use 16px font to avoid iOS Safari zooming input on focus */
           .ve-textarea{flex:1;min-height:42px;max-height:50vh;resize:none;background:#ffffff;border:1px solid rgba(17,24,39,0.14);color:#111827;border-radius:3px;padding:10px 10px;outline:none;font:16px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";overflow-y:auto;}
           .ve-select{background:#ffffff;border:1px solid rgba(17,24,39,0.14);color:#111827;border-radius:3px;padding:9px 10px;outline:none;font:16px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";}
@@ -704,6 +719,13 @@
           reasoningSel: null,
           btnFolder: null,
           btnAction: null,
+          // image attachment controls (image-gen only):
+          imageAttachIds: [],
+          btnImgClip: null,
+          btnImgUrl: null,
+          btnImgClear: null,
+          imgAttachBadge: null,
+          imgAttachThumbs: null,
           // per-pane scroll/jump state:
           autoScrollArmed: true,
           jumpBtn: null,
@@ -759,7 +781,7 @@
         row1.appendChild(ta);
 
         const row2 = document.createElement('div');
-        row2.className = 've-footer-row';
+        row2.className = 've-footer-row ve-footer-actions';
 
         const controls = document.createElement('div');
         controls.className = 've-footer-controls';
@@ -780,11 +802,38 @@
         btnFolder.title = 'Set base directory for this chat';
         btnFolder.setAttribute('aria-label', 'Set base directory for this chat');
 
+        const btnImgClip = document.createElement('button');
+        btnImgClip.className = 've-iconbtn';
+        btnImgClip.textContent = '📋';
+        btnImgClip.title = 'Attach image from clipboard';
+        btnImgClip.setAttribute('aria-label', 'Attach image from clipboard');
+
+        const btnImgUrl = document.createElement('button');
+        btnImgUrl.className = 've-iconbtn';
+        btnImgUrl.textContent = '🔗';
+        btnImgUrl.title = 'Attach image from URL';
+        btnImgUrl.setAttribute('aria-label', 'Attach image from URL');
+
+        const imgAttachBadge = document.createElement('span');
+        imgAttachBadge.className = 've-muted';
+        imgAttachBadge.style.cssText = 'font-size:12px;white-space:nowrap;';
+        imgAttachBadge.textContent = '';
+
+        const btnImgClear = document.createElement('button');
+        btnImgClear.className = 've-iconbtn';
+        btnImgClear.textContent = '✕';
+        btnImgClear.title = 'Clear attached images';
+        btnImgClear.setAttribute('aria-label', 'Clear attached images');
+
         controls.appendChild(modelLabel);
         controls.appendChild(modelSel);
         controls.appendChild(reasoningLabel);
         controls.appendChild(reasoningSel);
         controls.appendChild(btnFolder);
+        controls.appendChild(btnImgClip);
+        controls.appendChild(btnImgUrl);
+        controls.appendChild(imgAttachBadge);
+        controls.appendChild(btnImgClear);
 
         const actions = document.createElement('div');
         actions.className = 've-actions';
@@ -799,7 +848,12 @@
         row2.appendChild(controls);
         row2.appendChild(actions);
 
+        const imgAttachThumbs = document.createElement('div');
+        imgAttachThumbs.className = 've-attach-thumbs';
+        imgAttachThumbs.style.display = 'none';
+
         footerEl.appendChild(row1);
+        footerEl.appendChild(imgAttachThumbs);
         footerEl.appendChild(row2);
 
         pane.ta = ta;
@@ -807,11 +861,19 @@
         pane.reasoningSel = reasoningSel;
         pane.btnFolder = btnFolder;
         pane.btnAction = btnAction;
+        pane.btnImgClip = btnImgClip;
+        pane.btnImgUrl = btnImgUrl;
+        pane.btnImgClear = btnImgClear;
+        pane.imgAttachBadge = imgAttachBadge;
+        pane.imgAttachThumbs = imgAttachThumbs;
 
         // Wire per-pane controls (handlers reference functions defined later; safe because they're invoked on user interaction).
         modelSel.addEventListener('change', () => setSelectedModel(modelSel.value));
         reasoningSel.addEventListener('change', () => setSelectedReasoningEffort(reasoningSel.value));
         btnFolder.addEventListener('click', () => openBaseDirModal(pane));
+        btnImgClip.addEventListener('click', () => attachImageFromClipboard(pane));
+        btnImgUrl.addEventListener('click', () => attachImageFromUrlPrompt(pane));
+        btnImgClear.addEventListener('click', () => clearAttachedImages(pane));
         btnAction.addEventListener('click', () => {
           if (pane.running) cancelRun(pane);
           else sendMessage(pane);
@@ -829,6 +891,8 @@
           }
         });
 
+        // Initial visibility
+        try { updateImageAttachControls(pane); } catch {}
         return pane;
       };
 
@@ -972,6 +1036,79 @@
         return s.includes('image') || s.includes('gpt-image') || s.includes('dall-e') || s.includes('imagen');
       };
 
+      const updateImageAttachControls = (pane) => {
+        if (!pane) return;
+        const isImg = isImageGenModel(getSelectedModel());
+        const ids = Array.isArray(pane.imageAttachIds) ? pane.imageAttachIds : [];
+        const show = !!isImg;
+        const setDisp = (el, v) => { try { if (el) el.style.display = v ? '' : 'none'; } catch {} };
+        setDisp(pane.btnImgClip, show);
+        setDisp(pane.btnImgUrl, show);
+        setDisp(pane.btnImgClear, show && ids.length > 0);
+        if (pane.imgAttachBadge) {
+          pane.imgAttachBadge.textContent = ids.length ? `${ids.length} img` : '';
+          setDisp(pane.imgAttachBadge, show && ids.length > 0);
+        }
+
+        if (pane.imgAttachThumbs) {
+          pane.imgAttachThumbs.innerHTML = '';
+          if (show && ids.length > 0) {
+            const thumbPx =
+              typeof options.imageThumbPx === 'number' && options.imageThumbPx > 0
+                ? Math.floor(options.imageThumbPx)
+                : 64;
+            const modal = ensureImageModal();
+            for (const id of ids.map(String).filter(Boolean)) {
+              const wrap = document.createElement('div');
+              wrap.className = 've-attach-thumb';
+
+              const img = document.createElement('img');
+              img.src = imageDataUrl(pane.chatId, id);
+              img.alt = id;
+              img.loading = 'lazy';
+              img.width = thumbPx;
+              img.height = thumbPx;
+              img.style.width = `${thumbPx}px`;
+              img.style.height = `${thumbPx}px`;
+              img.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                modal.open(img.src, id);
+              });
+
+              const btnRm = document.createElement('button');
+              btnRm.type = 'button';
+              btnRm.title = 'Remove image';
+              btnRm.setAttribute('aria-label', 'Remove image');
+              btnRm.textContent = '×';
+              btnRm.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const cur = Array.isArray(pane.imageAttachIds) ? pane.imageAttachIds.map(String) : [];
+                const next = [];
+                let removed = false;
+                for (const x of cur) {
+                  if (!removed && x === id) {
+                    removed = true;
+                    continue;
+                  }
+                  next.push(x);
+                }
+                pane.imageAttachIds = next;
+                updateImageAttachControls(pane);
+              });
+
+              wrap.appendChild(img);
+              wrap.appendChild(btnRm);
+              pane.imgAttachThumbs.appendChild(wrap);
+            }
+            setDisp(pane.imgAttachThumbs, true);
+          } else {
+            setDisp(pane.imgAttachThumbs, false);
+          }
+        }
+      };
+
       const updateActionButton = (pane) => {
         if (!pane) return;
         const btn = pane.btnAction;
@@ -986,6 +1123,7 @@
         btn.textContent = isImg ? '🐵' : '▲';
         btn.title = isImg ? 'Generate image' : 'Send';
         btn.setAttribute('aria-label', isImg ? 'Generate image' : 'Send');
+        updateImageAttachControls(pane);
       };
 
       const groupToolOutputsForReplay = (chat) => {
@@ -2268,6 +2406,10 @@
         const reasoning_effort = getSelectedReasoningEffort();
         const imgMode = isImageGenModel(model_name);
         const params = imgMode ? { prompt: text, model_name } : { message: text, model_name };
+        if (imgMode) {
+          const ids = Array.isArray(pane.imageAttachIds) ? pane.imageAttachIds.map(String).filter(Boolean) : [];
+          if (ids.length > 0) params.reference_image_ids = ids;
+        }
         if (!imgMode && reasoning_effort && reasoning_effort !== 'default') params.reasoning_effort = reasoning_effort;
         setRunning(pane, true);
         ensureSSE(pane);
@@ -2283,8 +2425,104 @@
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(params),
           });
+          if (imgMode) {
+            // Clear only after a successful request.
+            pane.imageAttachIds = [];
+            updateImageAttachControls(pane);
+          }
         } catch (e) {
           setRunning(pane, false);
+          alert(String(e && e.message ? e.message : e));
+        }
+      };
+
+      const clearAttachedImages = (pane) => {
+        if (!pane) return;
+        pane.imageAttachIds = [];
+        updateImageAttachControls(pane);
+      };
+
+      const fileReaderToDataUrl = (blob) => new Promise((resolve, reject) => {
+        try {
+          const r = new FileReader();
+          r.onload = () => resolve(String(r.result || ''));
+          r.onerror = () => reject(new Error('failed to read image'));
+          r.readAsDataURL(blob);
+        } catch (e) {
+          reject(e);
+        }
+      });
+
+      const parseDataUrlToB64 = (dataUrl) => {
+        const s = String(dataUrl || '');
+        const m = s.match(/^data:([^;]+);base64,(.+)$/);
+        if (!m) return null;
+        return { mime_type: m[1], data_b64: m[2] };
+      };
+
+      const uploadImageDataToChat = async (chatId, mime_type, data_b64) => {
+        const id = String(chatId || '');
+        if (!id) throw new Error('no chat selected');
+        const mt = typeof mime_type === 'string' && mime_type ? mime_type : 'application/octet-stream';
+        const b64 = typeof data_b64 === 'string' && data_b64 ? data_b64 : '';
+        if (!b64) throw new Error('missing image data');
+        const resp = await apiFetch(`/chat/${encodeURIComponent(id)}/images`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ mime_type: mt, data_b64: b64 }),
+        });
+        const image_id = resp && (resp.id || resp.image_id) ? String(resp.id || resp.image_id) : '';
+        if (!image_id) throw new Error('image upload failed');
+        return image_id;
+      };
+
+      const attachImageFromClipboard = async (pane) => {
+        if (!pane || !pane.chatId) return;
+        try {
+          if (!navigator.clipboard || typeof navigator.clipboard.read !== 'function') {
+            throw new Error('Clipboard image read not supported (needs HTTPS + permissions)');
+          }
+          const items = await navigator.clipboard.read();
+          let blob = null;
+          let mt = '';
+          for (const it of items) {
+            const types = Array.isArray(it.types) ? it.types : [];
+            const best = types.find((t) => String(t || '').startsWith('image/')) || '';
+            if (!best) continue;
+            blob = await it.getType(best);
+            mt = best;
+            break;
+          }
+          if (!blob) throw new Error('No image found on clipboard');
+          const dataUrl = await fileReaderToDataUrl(blob);
+          const parsed = parseDataUrlToB64(dataUrl);
+          if (!parsed || !parsed.data_b64) throw new Error('Failed to parse clipboard image');
+          const imageId = await uploadImageDataToChat(pane.chatId, parsed.mime_type || mt || blob.type, parsed.data_b64);
+          pane.imageAttachIds = Array.isArray(pane.imageAttachIds) ? pane.imageAttachIds : [];
+          pane.imageAttachIds.push(imageId);
+          updateImageAttachControls(pane);
+        } catch (e) {
+          alert(String(e && e.message ? e.message : e));
+        }
+      };
+
+      const attachImageFromUrlPrompt = async (pane) => {
+        if (!pane || !pane.chatId) return;
+        try {
+          const u = window.prompt('Image URL to attach');
+          const urlStr = String(u || '').trim();
+          if (!urlStr) return;
+          const resp = await apiFetch(`/chat/${encodeURIComponent(String(pane.chatId))}/images/from_url`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ url: urlStr }),
+          });
+          const imageId = resp && (resp.id || resp.image_id) ? String(resp.id || resp.image_id) : '';
+          if (!imageId) throw new Error('image fetch failed');
+          pane.imageAttachIds = Array.isArray(pane.imageAttachIds) ? pane.imageAttachIds : [];
+          pane.imageAttachIds.push(imageId);
+          updateImageAttachControls(pane);
+        } catch (e) {
           alert(String(e && e.message ? e.message : e));
         }
       };
@@ -2764,6 +3002,159 @@
           return true;
         }
 
+        // POST /api/chat/:id/images { data_b64, mime_type? } -> { id }
+        const imageAddMatch = pathname.match(
+          new RegExp('^' + apiBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/chat/([^/]+)/images$')
+        );
+        if (req.method === 'POST' && imageAddMatch) {
+          const chatId = decodeURIComponent(imageAddMatch[1]);
+          try {
+            const raw = await readBody(req, 15 * 1024 * 1024);
+            const body = raw ? JSON.parse(raw) : {};
+            const b64 = body ? (body.data_b64 ?? body.data_base64 ?? body.b64_json ?? body.data ?? null) : null;
+            const mime_type = body && typeof body.mime_type === 'string' && body.mime_type.trim()
+              ? body.mime_type.trim()
+              : 'application/octet-stream';
+            if (typeof b64 !== 'string' || !b64.trim()) {
+              json(res, 400, { error: 'data_b64 is required' });
+              return true;
+            }
+            const chat = ChatSession.load(chatId);
+            if (!chat) {
+              json(res, 404, { error: 'not found' });
+              return true;
+            }
+            if (typeof chat.addImage !== 'function') {
+              json(res, 500, { error: 'chat does not support images' });
+              return true;
+            }
+            const rec = {
+              kind: 'reference',
+              mime_type,
+              data_b64: String(b64),
+              created_at: nowIso(),
+              source: 'upload',
+            };
+            const id = chat.addImage(rec);
+            try { chat.save(); } catch {}
+            json(res, 200, { id });
+          } catch (e) {
+            json(res, 500, { error: e.message || String(e) });
+          }
+          return true;
+        }
+
+        // POST /api/chat/:id/images/from_url { url } -> { id }
+        const imageFromUrlMatch = pathname.match(
+          new RegExp('^' + apiBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/chat/([^/]+)/images/from_url$')
+        );
+        if (req.method === 'POST' && imageFromUrlMatch) {
+          const chatId = decodeURIComponent(imageFromUrlMatch[1]);
+          try {
+            const body = await readJson(req);
+            const urlStr = body && typeof body.url === 'string' ? body.url.trim() : '';
+            if (!urlStr) {
+              json(res, 400, { error: 'url is required' });
+              return true;
+            }
+            const chat = ChatSession.load(chatId);
+            if (!chat) {
+              json(res, 404, { error: 'not found' });
+              return true;
+            }
+            if (typeof chat.addImage !== 'function') {
+              json(res, 500, { error: 'chat does not support images' });
+              return true;
+            }
+
+            const parseDataUrl = (s) => {
+              const m = String(s || '').match(/^data:([^;]+);base64,(.+)$/);
+              if (!m) return null;
+              return { mime_type: m[1], data_b64: m[2] };
+            };
+
+            const fetchUrlAsBuffer = (u, maxBytes, redirectsLeft) => new Promise((resolve, reject) => {
+              let parsed;
+              try { parsed = new URL(u); } catch { parsed = null; }
+              if (!parsed || !parsed.protocol) return reject(new Error('invalid url'));
+              const proto = parsed.protocol === 'https:' ? https : (parsed.protocol === 'http:' ? http : null);
+              if (!proto) return reject(new Error('unsupported url protocol'));
+              const req2 = proto.request(parsed, (r) => {
+                const code = r.statusCode || 0;
+                const loc = r.headers && r.headers.location ? String(r.headers.location) : '';
+                if ([301, 302, 303, 307, 308].includes(code) && loc && redirectsLeft > 0) {
+                  const next = new URL(loc, parsed).toString();
+                  r.resume();
+                  fetchUrlAsBuffer(next, maxBytes, redirectsLeft - 1).then(resolve, reject);
+                  return;
+                }
+                if (code < 200 || code >= 300) {
+                  r.resume();
+                  reject(new Error(`fetch failed: ${code}`));
+                  return;
+                }
+                const chunks = [];
+                let size = 0;
+                r.on('data', (c) => {
+                  size += c.length;
+                  if (size > maxBytes) {
+                    try { req2.destroy(); } catch {}
+                    return;
+                  }
+                  chunks.push(c);
+                });
+                r.on('end', () => {
+                  if (size > maxBytes) return reject(new Error('image too large'));
+                  resolve({
+                    buf: Buffer.concat(chunks),
+                    contentType: r.headers && r.headers['content-type'] ? String(r.headers['content-type']) : '',
+                    finalUrl: parsed.toString(),
+                  });
+                });
+              });
+              req2.on('error', reject);
+              req2.setTimeout(12000, () => {
+                try { req2.destroy(new Error('timeout')); } catch {}
+              });
+              req2.end();
+            });
+
+            const dataUrlParsed = parseDataUrl(urlStr);
+            let mime_type = 'application/octet-stream';
+            let data_b64 = null;
+            let finalUrl = urlStr;
+            if (dataUrlParsed) {
+              mime_type = dataUrlParsed.mime_type || mime_type;
+              data_b64 = dataUrlParsed.data_b64;
+            } else {
+              const fetched = await fetchUrlAsBuffer(urlStr, 10 * 1024 * 1024, 3);
+              const ct = String(fetched.contentType || '').split(';')[0].trim();
+              if (ct) mime_type = ct;
+              data_b64 = fetched.buf.toString('base64');
+              finalUrl = fetched.finalUrl || urlStr;
+            }
+
+            if (!data_b64) {
+              json(res, 500, { error: 'failed to fetch image' });
+              return true;
+            }
+            const rec = {
+              kind: 'reference',
+              mime_type,
+              data_b64: String(data_b64),
+              created_at: nowIso(),
+              source_url: finalUrl,
+              source: 'url',
+            };
+            const id = chat.addImage(rec);
+            try { chat.save(); } catch {}
+            json(res, 200, { id });
+          } catch (e) {
+            json(res, 500, { error: e.message || String(e) });
+          }
+          return true;
+        }
+
         // DELETE /api/chat/:id (delete persisted session file)
         if (req.method === 'DELETE' && chatMatch) {
           const chatId = decodeURIComponent(chatMatch[1]);
@@ -3110,6 +3501,13 @@
             (async () => {
               try {
                 await llm.complete({ stream: true });
+                try {
+                  // Best-effort cleanup of orphaned images (e.g., attached-but-never-used).
+                  if (llm && llm.chat && typeof llm.chat.cleanupImages === 'function') {
+                    llm.chat.cleanupImages();
+                    llm.chat.save();
+                  }
+                } catch {}
                 emit(chatId, 'run.done', { ts: nowIso() });
               } catch (e) {
                 emit(chatId, 'run.error', { ts: nowIso(), error: e.message || String(e) });
@@ -3187,6 +3585,13 @@
 
             try {
               const result = await llm.generateImage(String(prompt), referenceImages, optionsObj);
+              try {
+                // Best-effort cleanup of orphaned images (e.g., attached-but-never-used).
+                if (llm && llm.chat && typeof llm.chat.cleanupImages === 'function') {
+                  llm.chat.cleanupImages();
+                  llm.chat.save();
+                }
+              } catch {}
               emit(chatId, 'chat.refresh', { ts: nowIso() });
               emit(chatId, 'run.done', { ts: nowIso() });
               json(res, 200, { success: true, result });
