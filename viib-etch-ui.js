@@ -177,6 +177,55 @@
         pendingUserEcho: null,
       });
 
+      // Clipboard helper: always write PNG for compatibility.
+      const copyImageUrlToClipboardAsPng = async (src) => {
+        if (!src) throw new Error('missing image url');
+        if (!window.isSecureContext) throw new Error('secure context required');
+        if (!(navigator.clipboard && window.ClipboardItem && typeof navigator.clipboard.write === 'function')) {
+          throw new Error('clipboard image write not supported');
+        }
+
+        const res = await fetch(src, { credentials: 'same-origin' });
+        const blob = await res.blob();
+
+        const toPngBlob = async (inputBlob) => {
+          if (typeof createImageBitmap === 'function') {
+            const bmp = await createImageBitmap(inputBlob);
+            const canvas = document.createElement('canvas');
+            canvas.width = bmp.width;
+            canvas.height = bmp.height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(bmp, 0, 0);
+            return await new Promise((resolve, reject) => {
+              canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('png encode failed'))), 'image/png');
+            });
+          }
+          const url = URL.createObjectURL(inputBlob);
+          try {
+            const img = await new Promise((resolve, reject) => {
+              const el = new Image();
+              el.onload = () => resolve(el);
+              el.onerror = () => reject(new Error('image decode failed'));
+              el.src = url;
+            });
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth || img.width;
+            canvas.height = img.naturalHeight || img.height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            return await new Promise((resolve, reject) => {
+              canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('png encode failed'))), 'image/png');
+            });
+          } finally {
+            try { URL.revokeObjectURL(url); } catch {}
+          }
+        };
+
+        const outBlob = (String(blob.type || '').toLowerCase() === 'image/png') ? blob : await toPngBlob(blob);
+        const item = new ClipboardItem({ 'image/png': outBlob });
+        await navigator.clipboard.write([item]);
+      };
+
       // Floating image preview modal (reused).
       const ensureImageModal = () => {
         const existing = root.querySelector('[data-ve-image-modal="1"]');
@@ -196,19 +245,7 @@
             }, 900);
           };
 
-          const copyImageFromUrl = async (src) => {
-            if (!src) throw new Error('missing image url');
-            // Copying images requires a secure context + clipboard.write support in most browsers.
-            if (!window.isSecureContext) throw new Error('secure context required');
-            if (!(navigator.clipboard && window.ClipboardItem && typeof navigator.clipboard.write === 'function')) {
-              throw new Error('clipboard image write not supported');
-            }
-            const res = await fetch(src, { credentials: 'same-origin' });
-            const blob = await res.blob();
-            const mime = blob.type || 'image/png';
-            const item = new ClipboardItem({ [mime]: blob });
-            await navigator.clipboard.write([item]);
-          };
+          const copyImageFromUrl = copyImageUrlToClipboardAsPng;
 
           if (copyBtn) {
             copyBtn.onclick = async () => {
@@ -387,18 +424,7 @@
           }, 900);
         };
 
-        const copyImageFromUrl = async (src) => {
-          if (!src) throw new Error('missing image url');
-          if (!window.isSecureContext) throw new Error('secure context required');
-          if (!(navigator.clipboard && window.ClipboardItem && typeof navigator.clipboard.write === 'function')) {
-            throw new Error('clipboard image write not supported');
-          }
-          const res = await fetch(src, { credentials: 'same-origin' });
-          const blob = await res.blob();
-          const mime = blob.type || 'image/png';
-          const item = new ClipboardItem({ [mime]: blob });
-          await navigator.clipboard.write([item]);
-        };
+        const copyImageFromUrl = copyImageUrlToClipboardAsPng;
 
         copyBtn.addEventListener('click', async () => {
           try {
