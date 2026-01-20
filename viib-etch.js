@@ -136,6 +136,10 @@ class ChatSession {
     this.title = data.title || null;
     this.model_name = data.model_name || null;
     this.messages = data.messages || [];
+    // In-memory image store: id -> image record
+    // Record shape (minimal):
+    //   { id, kind: 'reference'|'generated', mime_type, data_b64, created_at, ... }
+    this.images = (data.images && typeof data.images === 'object') ? data.images : {};
     this.data = data.data || {};
     // Persistent base directory for tool execution (optional).
     // If set, tool execution will chdir() into this directory for the duration of the tool call.
@@ -249,6 +253,7 @@ class ChatSession {
       title: this.title,
       model_name: this.model_name,
       messages: this.messages,
+      images: this.images,
       data: this.data,
       base_dir: this.base_dir
     };
@@ -270,6 +275,81 @@ class ChatSession {
     this.messages.push(message);
     this.save();
     return message;
+  }
+
+  _ensureImagesMap() {
+    if (!this.images || typeof this.images !== 'object') this.images = {};
+    return this.images;
+  }
+
+  addImage(imageRecord) {
+    if (!imageRecord || typeof imageRecord !== 'object') {
+      throw new Error('addImage: imageRecord must be an object');
+    }
+    const images = this._ensureImagesMap();
+    const id = imageRecord.id ? String(imageRecord.id) : crypto.randomUUID();
+    const rec = { ...imageRecord, id };
+    images[id] = rec;
+    this.save();
+    return id;
+  }
+
+  getImage(id) {
+    const images = this._ensureImagesMap();
+    const key = (id === null || id === undefined) ? '' : String(id);
+    return images[key] || null;
+  }
+
+  listImages(filter = {}) {
+    const images = this._ensureImagesMap();
+    const kind = filter && filter.kind ? String(filter.kind) : null;
+    const out = Object.values(images);
+    const filtered = kind ? out.filter((r) => r && r.kind === kind) : out;
+    filtered.sort((a, b) => {
+      const ta = a && a.created_at ? Date.parse(a.created_at) : 0;
+      const tb = b && b.created_at ? Date.parse(b.created_at) : 0;
+      if (ta !== tb) return ta - tb;
+      return String((a && a.id) || '').localeCompare(String((b && b.id) || ''));
+    });
+    return filtered;
+  }
+
+  getImageData(id) {
+    const rec = this.getImage(id);
+    if (!rec) throw new Error(`image not found: ${String(id)}`);
+    const b64 = rec.data_b64 ?? rec.data_base64 ?? rec.b64_json ?? rec.data ?? null;
+    if (!b64 || typeof b64 !== 'string') {
+      throw new Error(`image has no data_b64: ${String(id)}`);
+    }
+    return Buffer.from(b64, 'base64');
+  }
+
+  _stringifyStructuredMessageForAPI(msg) {
+    if (!msg || typeof msg !== 'object') return '';
+    const c = msg.content;
+    if (!c || typeof c !== 'object') return '';
+    const t = c.type ? String(c.type) : '';
+    if (t === 'image_prompt') {
+      const prompt = c.prompt ? String(c.prompt) : '';
+      const refs = Array.isArray(c.reference_images) ? c.reference_images.map(String) : [];
+      return [
+        '[image_prompt]',
+        prompt ? `prompt: ${prompt}` : null,
+        refs.length ? `reference_images: ${refs.join(', ')}` : null,
+      ].filter(Boolean).join('\n');
+    }
+    if (t === 'image') {
+      const prompt = c.prompt ? String(c.prompt) : '';
+      const provider = c.provider ? String(c.provider) : '';
+      const imgs = Array.isArray(c.images) ? c.images.map(String) : [];
+      return [
+        '[image_result]',
+        provider ? `provider: ${provider}` : null,
+        prompt ? `prompt: ${prompt}` : null,
+        imgs.length ? `images: ${imgs.join(', ')}` : null,
+      ].filter(Boolean).join('\n');
+    }
+    try { return JSON.stringify(c); } catch { return ''; }
   }
 
   getMessagesForAPI() {
@@ -295,18 +375,14 @@ class ChatSession {
     return this.messages.map(msg => {
       const apiMsg = { role: msg.role };
       
-      if (msg.role === 'assistant' && typeof msg.content === 'object' && msg.content !== null) {
-        // If content is structured, extract the main content
-        if (msg.content.content !== undefined && msg.content.content !== null) {
-          apiMsg.content = msg.content.content;
-        } else {
-          apiMsg.content = '';
-        }
+      if ((msg.role === 'assistant' || msg.role === 'user') && typeof msg.content === 'object' && msg.content !== null) {
+        // Structured blocks (e.g., image prompt/result). Serialize to text for API context.
+        apiMsg.content = this._stringifyStructuredMessageForAPI(msg);
         
         // Include tool calls if present (ensure it's an array)
-        if (msg.content.tool_call) {
-          apiMsg.tool_calls = Array.isArray(msg.content.tool_call) 
-            ? msg.content.tool_call 
+        if (msg.role === 'assistant' && msg.content.tool_call) {
+          apiMsg.tool_calls = Array.isArray(msg.content.tool_call)
+            ? msg.content.tool_call
             : [msg.content.tool_call];
         }
       } else if (msg.role === 'assistant') {
@@ -2761,6 +2837,301 @@ class ChatLLM {
   async send(message, options = {}) {
     this.chat.addMessage({ role: 'user', content: message });
     return this.complete(options);
+  }
+
+  /**
+   * generateImage(prompt, referenceImages=null, options={})
+   *
+   * - Stores all images in ChatSession.images[id] (base64), never writes to disk.
+   * - Assistant message block stores image ids.
+   * - For Gemini, stores raw model parts and replays them for continuation by default.
+   */
+  async generateImage(prompt, referenceImages = null, options = {}) {
+    if (typeof prompt !== 'string' || !prompt.trim()) {
+      throw new Error('generateImage: prompt must be a non-empty string');
+    }
+
+    const model = this._ensureModelResolved();
+    const client = this.getClient();
+    const isGemini = model._isGeminiModel();
+
+    const nowIso = () => new Date().toISOString();
+
+    const guessMime = (p) => {
+      const ext = String(p || '').toLowerCase();
+      if (ext.endsWith('.png')) return 'image/png';
+      if (ext.endsWith('.jpg') || ext.endsWith('.jpeg')) return 'image/jpeg';
+      if (ext.endsWith('.webp')) return 'image/webp';
+      if (ext.endsWith('.gif')) return 'image/gif';
+      return 'application/octet-stream';
+    };
+
+    // Normalize referenceImages
+    const refsRaw =
+      referenceImages === null || referenceImages === undefined
+        ? []
+        : (Array.isArray(referenceImages) ? referenceImages : [referenceImages]);
+
+    // Save reference images into ChatSession.images (in-memory)
+    const referenceImageIds = [];
+    for (const r of refsRaw) {
+      // Allow passing an existing ChatSession image id directly.
+      if (typeof r === 'string' && this.chat.getImage(r)) {
+        referenceImageIds.push(String(r));
+        continue;
+      }
+
+      if (typeof r === 'string') {
+        // Treat as file path; read and store.
+        const abs = path.resolve(r);
+        const buf = fs.readFileSync(abs);
+        const rec = {
+          kind: 'reference',
+          mime_type: guessMime(abs),
+          data_b64: buf.toString('base64'),
+          created_at: nowIso(),
+          source_file_path: abs,
+        };
+        referenceImageIds.push(this.chat.addImage(rec));
+        continue;
+      }
+
+      if (!r || typeof r !== 'object') {
+        throw new Error('generateImage: each referenceImages entry must be an id string, a file path string, or an object');
+      }
+
+      const b64 = r.data_b64 ?? r.data_base64 ?? r.b64_json ?? r.data ?? null;
+      const hasB64 = typeof b64 === 'string' && b64.length > 0;
+      if (!hasB64) {
+        throw new Error('generateImage: reference image object must include data_b64');
+      }
+
+      const rec = {
+        id: r.id || crypto.randomUUID(),
+        kind: 'reference',
+        mime_type: r.mime_type || 'application/octet-stream',
+        data_b64: b64,
+        created_at: nowIso(),
+      };
+      referenceImageIds.push(this.chat.addImage(rec));
+    }
+
+    // Persist user intent
+    this.chat.addMessage({
+      role: 'user',
+      content: {
+        type: 'image_prompt',
+        prompt,
+        reference_images: referenceImageIds,
+        options: (options && typeof options === 'object') ? options : {},
+      },
+    });
+
+    // Helper: build inlineData parts for reference ids
+    const refInlineParts = () => {
+      const parts = [];
+      for (const id of referenceImageIds) {
+        const rec = this.chat.getImage(id);
+        if (!rec) continue;
+        const b64 = rec.data_b64 ?? rec.data_base64 ?? rec.b64_json ?? rec.data ?? null;
+        if (!b64) continue;
+        parts.push({
+          inlineData: {
+            data: String(b64),
+            mimeType: rec.mime_type || 'image/png',
+          },
+        });
+      }
+      return parts;
+    };
+
+    const normalizeRawModelParts = (parts) => {
+      // Keep JSON-serializable subset and preserve thoughtSignature.
+      const out = [];
+      const arr = Array.isArray(parts) ? parts : [];
+      for (const part of arr) {
+        if (!part || typeof part !== 'object') continue;
+        const ts =
+          part.thoughtSignature ??
+          part.thought_signature ??
+          part.functionCall?.thoughtSignature ??
+          part.functionCall?.thought_signature ??
+          null;
+        if (typeof part.text === 'string') {
+          const p = { text: part.text };
+          if (part.thought === true) p.thought = true;
+          if (ts) p.thoughtSignature = ts;
+          out.push(p);
+          continue;
+        }
+        const img = part.inlineData || part.inline_data || null;
+        if (img && img.data) {
+          const mt = img.mimeType || img.mime_type || 'image/png';
+          const p = { inlineData: { data: String(img.data), mimeType: String(mt) } };
+          if (ts) p.thoughtSignature = ts;
+          out.push(p);
+          continue;
+        }
+        if (part.functionCall) {
+          const p = { functionCall: part.functionCall };
+          if (ts) p.thoughtSignature = ts;
+          out.push(p);
+          continue;
+        }
+      }
+      return out;
+    };
+
+    const findLastImageTurn = () => {
+      for (let i = (this.chat.messages || []).length - 1; i >= 0; i--) {
+        const m = this.chat.messages[i];
+        if (!m || m.role !== 'assistant') continue;
+        const c = m.content;
+        if (!c || typeof c !== 'object') continue;
+        if (c.type !== 'image') continue;
+        if (c.raw_model_message && typeof c.raw_model_message === 'object' && Array.isArray(c.raw_model_message.parts)) {
+          return c;
+        }
+      }
+      return null;
+    };
+
+    const buildGeminiImageHistoryFromChat = () => {
+      // Reconstruct a gemini-native history from stored ChatSession messages.
+      // Only includes structured image_prompt and image turns.
+      const out = [];
+      const msgs = Array.isArray(this.chat.messages) ? this.chat.messages : [];
+      for (const m of msgs) {
+        if (!m || typeof m !== 'object') continue;
+        if (m.role === 'user' && m.content && typeof m.content === 'object' && m.content.type === 'image_prompt') {
+          const p = m.content.prompt ? String(m.content.prompt) : '';
+          const refIds = Array.isArray(m.content.reference_images) ? m.content.reference_images : [];
+          const parts = [];
+          for (const id of refIds) {
+            const rec = this.chat.getImage(id);
+            if (!rec) continue;
+            const b64 = rec.data_b64 ?? rec.data_base64 ?? rec.b64_json ?? rec.data ?? null;
+            if (!b64) continue;
+            parts.push({
+              inlineData: { data: String(b64), mimeType: rec.mime_type || 'image/png' },
+            });
+          }
+          parts.push({ text: p });
+          out.push({ role: 'user', parts });
+          continue;
+        }
+        if (m.role === 'assistant' && m.content && typeof m.content === 'object' && m.content.type === 'image') {
+          const rm = m.content.raw_model_message;
+          if (rm && typeof rm === 'object' && Array.isArray(rm.parts) && rm.parts.length > 0) {
+            out.push({ role: 'model', parts: rm.parts });
+          }
+          continue;
+        }
+      }
+      return out;
+    };
+
+    let outImages = []; // [{data_b64, mime_type}]
+    let rawModelMessage = null;
+
+    if (isGemini) {
+      const modelName = model.model.replace(/^google\//, '');
+
+      // Continuation by default: send the full prior gemini-native history "as-is",
+      // then append the new user turn. Persist the updated history back onto chat.data.
+      let history = (this.chat && this.chat.data && Array.isArray(this.chat.data.gemini_image_history))
+        ? this.chat.data.gemini_image_history
+        : null;
+      if (!history || history.length === 0) {
+        history = buildGeminiImageHistoryFromChat();
+      }
+
+      const userTurn = { role: 'user', parts: [...refInlineParts(), { text: String(prompt) }] };
+      const contents = [...history, userTurn];
+
+      const request = {
+        model: modelName,
+        contents,
+        generationConfig: {},
+      };
+      if (options && typeof options === 'object' && typeof options.size === 'string') {
+        request.generationConfig.size = options.size;
+      }
+
+      const response = await client.models.generateContent(request);
+      const parts = response?.candidates?.[0]?.content?.parts || [];
+      const normalizedParts = normalizeRawModelParts(parts);
+      rawModelMessage = { role: 'model', parts: normalizedParts };
+
+      // Persist gemini-native history for exact replay next time.
+      const nextHistory = [...history, userTurn, rawModelMessage];
+      this.chat.data = this.chat.data && typeof this.chat.data === 'object' ? this.chat.data : {};
+      this.chat.data.gemini_image_history = nextHistory;
+      this.chat.save();
+
+      // Extract images
+      for (const p of parts) {
+        const img = p && (p.inlineData || p.inline_data);
+        if (!img || !img.data) continue;
+        const mime = img.mimeType || img.mime_type || 'image/png';
+        outImages.push({ data_b64: String(img.data), mime_type: String(mime) });
+      }
+    } else {
+      // OpenAI image generation (one-shot; continuation not guaranteed)
+      const tools = [{ type: 'image_generation' }];
+      const input = [{ role: 'user', content: prompt }];
+      const resp = await client.responses.create({ model: model.model, input, tools });
+      const outputs = resp.output || [];
+      for (const item of outputs) {
+        if (!item || typeof item !== 'object') continue;
+        if (item.type !== 'image') continue;
+        const imgList = Array.isArray(item.images) ? item.images : [];
+        for (const img of imgList) {
+          if (img && img.b64_json) outImages.push({ data_b64: String(img.b64_json), mime_type: 'image/png' });
+        }
+      }
+      rawModelMessage = null;
+    }
+
+    if (!outImages.length) {
+      throw new Error('generateImage: no image data returned from provider');
+    }
+
+    const savedIds = [];
+    for (const img of outImages) {
+      const rec = {
+        kind: 'generated',
+        mime_type: img.mime_type,
+        data_b64: img.data_b64,
+        created_at: nowIso(),
+        provider: isGemini ? 'gemini' : 'openai',
+        prompt,
+        reference_images: referenceImageIds,
+        raw_model_message: rawModelMessage,
+      };
+      savedIds.push(this.chat.addImage(rec));
+    }
+
+    const assistantMessage = {
+      role: 'assistant',
+      content: {
+        type: 'image',
+        provider: isGemini ? 'gemini' : 'openai',
+        prompt,
+        reference_images: referenceImageIds,
+        images: savedIds,
+        raw_model_message: rawModelMessage,
+      },
+    };
+    this.chat.addMessage(assistantMessage);
+
+    return {
+      provider: isGemini ? 'gemini' : 'openai',
+      prompt,
+      reference_images: referenceImageIds,
+      images: savedIds,
+      message: assistantMessage,
+    };
   }
 }
 

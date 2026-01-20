@@ -18,6 +18,7 @@
       reasoningEffortStorageKey: 'viib-etch.ui.reasoningEffort',
       chatStorageKey: 'viib-etch.ui.chatId',
       autoScrollThresholdPx: 140,
+      imageThumbPx: 64,
     };
 
     const escapeHtml = (s) =>
@@ -78,6 +79,8 @@
       const setSelectedModel = (m) => {
         state.selectedModel = String(m || '');
         localStorage.setItem(options.modelStorageKey, state.selectedModel);
+        // Update send button icon/behavior for active pane.
+        try { updateActionButton(getActivePane()); } catch {}
       };
 
       const getSelectedReasoningEffort = () =>
@@ -173,6 +176,260 @@
         mdTimers: new Map(),
         pendingUserEcho: null,
       });
+
+      // Floating image preview modal (reused).
+      const ensureImageModal = () => {
+        const existing = root.querySelector('[data-ve-image-modal="1"]');
+        if (existing) {
+          const img = existing.querySelector('img');
+          const download = existing.querySelector('a[data-ve-download="1"]');
+          const copyBtn = existing.querySelector('button[data-ve-copy="1"]');
+          const titleEl = existing.querySelector('[data-ve-title="1"]');
+
+          const setTitleFlash = (text) => {
+            if (!titleEl) return;
+            const prev = titleEl.getAttribute('data-prev') || titleEl.textContent || '';
+            titleEl.setAttribute('data-prev', prev);
+            titleEl.textContent = text;
+            setTimeout(() => {
+              try { titleEl.textContent = titleEl.getAttribute('data-prev') || 'Image preview'; } catch {}
+            }, 900);
+          };
+
+          const copyImageFromUrl = async (src) => {
+            if (!src) throw new Error('missing image url');
+            // Copying images requires a secure context + clipboard.write support in most browsers.
+            if (!window.isSecureContext) throw new Error('secure context required');
+            if (!(navigator.clipboard && window.ClipboardItem && typeof navigator.clipboard.write === 'function')) {
+              throw new Error('clipboard image write not supported');
+            }
+            const res = await fetch(src, { credentials: 'same-origin' });
+            const blob = await res.blob();
+            const mime = blob.type || 'image/png';
+            const item = new ClipboardItem({ [mime]: blob });
+            await navigator.clipboard.write([item]);
+          };
+
+          if (copyBtn) {
+            copyBtn.onclick = async () => {
+              try {
+                const src = img ? img.src : '';
+                await copyImageFromUrl(src);
+                setTitleFlash('Copied image');
+              } catch (e) {
+                const msg = String(e && e.message ? e.message : e).toLowerCase();
+                if (msg.includes('secure context')) setTitleFlash('Copy image needs HTTPS');
+                else if (msg.includes('not supported')) setTitleFlash('Copy image not supported');
+                else setTitleFlash('Copy failed');
+              }
+            };
+          }
+
+          return {
+            open: (src, filename) => {
+              if (img) img.src = src;
+              if (download) {
+                download.href = src;
+                download.setAttribute('download', filename || 'image');
+              }
+              if (titleEl) titleEl.textContent = filename ? `Image: ${filename}` : 'Image preview';
+              existing.style.display = 'flex';
+              existing.setAttribute('aria-hidden', 'false');
+            },
+            close: () => {
+              existing.style.display = 'none';
+              existing.setAttribute('aria-hidden', 'true');
+              if (img) img.src = '';
+            },
+          };
+        }
+
+        const overlay = document.createElement('div');
+        overlay.setAttribute('data-ve-image-modal', '1');
+        overlay.setAttribute('role', 'dialog');
+        overlay.setAttribute('aria-modal', 'true');
+        overlay.setAttribute('aria-hidden', 'true');
+        overlay.style.cssText = [
+          'position:fixed',
+          'inset:0',
+          'z-index:9999',
+          'background:rgba(0,0,0,0.55)',
+          'display:none',
+          'align-items:center',
+          'justify-content:center',
+          'padding:24px',
+        ].join(';');
+
+        const panel = document.createElement('div');
+        panel.style.cssText = [
+          'background:#fff',
+          'border-radius:14px',
+          'box-shadow:0 18px 60px rgba(0,0,0,0.35)',
+          'max-width:min(92vw, 980px)',
+          'max-height:92vh',
+          'width:auto',
+          'overflow:hidden',
+          'display:flex',
+          'flex-direction:column',
+        ].join(';');
+
+        const bar = document.createElement('div');
+        bar.style.cssText = [
+          'display:flex',
+          'align-items:center',
+          'justify-content:space-between',
+          'gap:12px',
+          'padding:10px 12px',
+          'border-bottom:1px solid rgba(17,24,39,0.10)',
+          'background:#ffffff',
+        ].join(';');
+
+        const title = document.createElement('div');
+        title.setAttribute('data-ve-title', '1');
+        title.className = 've-muted';
+        title.style.cssText = 'font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+        title.textContent = 'Image preview';
+
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex;gap:8px;align-items:center;';
+
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        copyBtn.setAttribute('data-ve-copy', '1');
+        copyBtn.textContent = 'Copy';
+        copyBtn.style.cssText = [
+          'display:inline-block',
+          'padding:6px 10px',
+          'border-radius:10px',
+          'border:1px solid rgba(17,24,39,0.14)',
+          'background:#fff',
+          'cursor:pointer',
+          'color:#111827',
+          'font-size:12px',
+        ].join(';');
+
+        const download = document.createElement('a');
+        download.setAttribute('data-ve-download', '1');
+        download.href = '#';
+        download.textContent = 'Download';
+        download.style.cssText = [
+          'display:inline-block',
+          'padding:6px 10px',
+          'border-radius:10px',
+          'border:1px solid rgba(17,24,39,0.14)',
+          'text-decoration:none',
+          'color:#111827',
+          'font-size:12px',
+          'background:#fff',
+        ].join(';');
+
+        const closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.textContent = '✕';
+        closeBtn.setAttribute('aria-label', 'Close');
+        closeBtn.style.cssText = [
+          'width:32px',
+          'height:32px',
+          'border-radius:10px',
+          'border:1px solid rgba(17,24,39,0.14)',
+          'background:#fff',
+          'cursor:pointer',
+          'font-size:14px',
+          'line-height:1',
+        ].join(';');
+
+        actions.appendChild(copyBtn);
+        actions.appendChild(download);
+        actions.appendChild(closeBtn);
+        bar.appendChild(title);
+        bar.appendChild(actions);
+
+        const body = document.createElement('div');
+        body.style.cssText = [
+          'padding:12px',
+          'background:#f9fafb',
+          'display:flex',
+          'align-items:center',
+          'justify-content:center',
+          'max-height:calc(92vh - 54px)',
+          'overflow:auto',
+        ].join(';');
+
+        const img = document.createElement('img');
+        img.alt = 'Preview';
+        img.style.cssText = [
+          'max-width:100%',
+          'max-height:calc(92vh - 86px)',
+          'border-radius:12px',
+          'border:1px solid rgba(17,24,39,0.12)',
+          'background:#fff',
+          'object-fit:contain',
+        ].join(';');
+        body.appendChild(img);
+
+        panel.appendChild(bar);
+        panel.appendChild(body);
+        overlay.appendChild(panel);
+        root.appendChild(overlay);
+
+        const close = () => {
+          overlay.style.display = 'none';
+          overlay.setAttribute('aria-hidden', 'true');
+          img.src = '';
+        };
+
+        const flashTitle = (text) => {
+          const prev = title.getAttribute('data-prev') || title.textContent || '';
+          title.setAttribute('data-prev', prev);
+          title.textContent = text;
+          setTimeout(() => {
+            try { title.textContent = title.getAttribute('data-prev') || 'Image preview'; } catch {}
+          }, 900);
+        };
+
+        const copyImageFromUrl = async (src) => {
+          if (!src) throw new Error('missing image url');
+          if (!window.isSecureContext) throw new Error('secure context required');
+          if (!(navigator.clipboard && window.ClipboardItem && typeof navigator.clipboard.write === 'function')) {
+            throw new Error('clipboard image write not supported');
+          }
+          const res = await fetch(src, { credentials: 'same-origin' });
+          const blob = await res.blob();
+          const mime = blob.type || 'image/png';
+          const item = new ClipboardItem({ [mime]: blob });
+          await navigator.clipboard.write([item]);
+        };
+
+        copyBtn.addEventListener('click', async () => {
+          try {
+            await copyImageFromUrl(img.src);
+            flashTitle('Copied image');
+          } catch (e) {
+            const msg = String(e && e.message ? e.message : e).toLowerCase();
+            if (msg.includes('secure context')) flashTitle('Copy image needs HTTPS');
+            else if (msg.includes('not supported')) flashTitle('Copy image not supported');
+            else flashTitle('Copy failed');
+          }
+        });
+
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+        closeBtn.addEventListener('click', close);
+        window.addEventListener('keydown', (e) => {
+          if (overlay.style.display !== 'none' && e.key === 'Escape') close();
+        });
+
+        return {
+          open: (src, filename) => {
+            img.src = src;
+            download.href = src;
+            download.setAttribute('download', filename || 'image');
+            title.textContent = filename ? `Image: ${filename}` : 'Image preview';
+            overlay.style.display = 'flex';
+            overlay.setAttribute('aria-hidden', 'false');
+          },
+          close,
+        };
+      };
 
       const ensureThinkingNode = (pane) => {
         if (!pane) return null;
@@ -647,6 +904,7 @@
         }
         const sel = getSelectedModel();
         if (sel) selEl.value = sel;
+        updateActionButton(pane);
       };
 
       const renderReasoningEffort = (pane) => {
@@ -674,14 +932,34 @@
       const setRunning = (pane, running) => {
         if (!pane) return;
         pane.running = !!running;
+        updateActionButton(pane);
+      };
+
+      const resolveModelRec = (name) => {
+        const n = String(name || '');
+        return (state.models || []).find((m) => m && m.name === n) || { name: n, model: n };
+      };
+
+      const isImageGenModel = (model_name) => {
+        const rec = resolveModelRec(model_name);
+        const s = `${rec && rec.name ? rec.name : ''} ${rec && rec.model ? rec.model : ''}`.toLowerCase();
+        return s.includes('image') || s.includes('gpt-image') || s.includes('dall-e') || s.includes('imagen');
+      };
+
+      const updateActionButton = (pane) => {
+        if (!pane) return;
         const btn = pane.btnAction;
         if (!btn) return;
-        // Single action button:
-        // - idle: ▲ send
-        // - running: ■ stop/cancel
-        btn.textContent = pane.running ? '■' : '▲';
-        btn.title = pane.running ? 'Stop' : 'Send';
-        btn.setAttribute('aria-label', pane.running ? 'Stop' : 'Send');
+        if (pane.running) {
+          btn.textContent = '■';
+          btn.title = 'Stop';
+          btn.setAttribute('aria-label', 'Stop');
+          return;
+        }
+        const isImg = isImageGenModel(getSelectedModel());
+        btn.textContent = isImg ? '🐵' : '▲';
+        btn.title = isImg ? 'Generate image' : 'Send';
+        btn.setAttribute('aria-label', isImg ? 'Generate image' : 'Send');
       };
 
       const groupToolOutputsForReplay = (chat) => {
@@ -982,6 +1260,44 @@
 
         const assistantTools = groupToolOutputsForReplay(chat);
 
+        const apiBaseUrl = (options.apiBase || '').replace(/\/+$/, '');
+        const imageDataUrl = (chatId, imageId) => {
+          const tok = encodeURIComponent(getToken() || '');
+          return `${apiBaseUrl}/chat/${encodeURIComponent(String(chatId))}/images/${encodeURIComponent(String(imageId))}/data?token=${tok}`;
+        };
+        const renderImageThumbs = (parentEl, chatId, imageIds) => {
+          const ids = Array.isArray(imageIds) ? imageIds.map(String).filter(Boolean) : [];
+          if (ids.length === 0) return;
+          const thumbPx = (typeof options.imageThumbPx === 'number' && options.imageThumbPx > 0)
+            ? Math.floor(options.imageThumbPx)
+            : 64;
+          const modal = ensureImageModal();
+          const grid = document.createElement('div');
+          grid.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;';
+          for (const id of ids) {
+            const img = document.createElement('img');
+            img.src = imageDataUrl(chatId, id);
+            img.alt = id;
+            img.loading = 'lazy';
+            img.style.cssText = [
+              `width:${thumbPx}px`,
+              `height:${thumbPx}px`,
+              'border-radius:10px',
+              'border:1px solid rgba(17,24,39,0.12)',
+              'background:#fff',
+              'object-fit:contain',
+              'cursor:pointer',
+            ].join(';');
+            img.addEventListener('click', (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              modal.open(img.src, id);
+            });
+            grid.appendChild(img);
+          }
+          parentEl.appendChild(grid);
+        };
+
         const messages = chat.messages || [];
         for (let i = 0; i < messages.length; i++) {
           const msg = messages[i];
@@ -990,14 +1306,25 @@
           if (msg.role === 'user') {
             const wrap = document.createElement('div');
             wrap.className = 've-msg ve-user';
-            wrap.innerHTML = `<div class="ve-bubble"><pre>${escapeHtml(msg.content || '')}</pre></div>`;
+            if (msg.content && typeof msg.content === 'object' && msg.content.type === 'image_prompt') {
+              const p = msg.content.prompt ? String(msg.content.prompt) : '';
+              const bubble = document.createElement('div');
+              bubble.className = 've-bubble';
+              bubble.innerHTML = `<pre>${escapeHtml(p || '(image prompt)')}</pre>`;
+              renderImageThumbs(bubble, chat.id, msg.content.reference_images);
+              wrap.appendChild(bubble);
+            } else {
+              wrap.innerHTML = `<div class="ve-bubble"><pre>${escapeHtml(msg.content || '')}</pre></div>`;
+            }
             bodyEl.appendChild(wrap);
             continue;
           }
 
           if (msg.role === 'assistant') {
             // Skip assistant blocks that only have tool calls (no content, no reasoning)
-            const hasContent = msg.content && String(msg.content).trim();
+            const hasContent =
+              (typeof msg.content === 'string' && String(msg.content).trim()) ||
+              (msg.content && typeof msg.content === 'object');
             const hasReasoning = msg.reasoning && String(msg.reasoning).trim();
             const toolArr = assistantTools.get(i) || [];
             const hasOnlyTools = !hasContent && !hasReasoning && toolArr.length > 0;
@@ -1008,6 +1335,8 @@
 
             const wrap = document.createElement('div');
             wrap.className = 've-msg ve-assistant';
+
+            const isImageBlock = msg.content && typeof msg.content === 'object' && msg.content.type === 'image';
 
             // Combined assistant block (response + reasoning in one) 
             const rk = paneScopedKey(pane, responseKey(i));
@@ -1032,7 +1361,9 @@
 
             const preview = document.createElement('div');
             preview.className = 've-assistant-preview';
-            preview.textContent = firstLine(msg.content || msg.reasoning || '(no content)') || '(no content)';
+            preview.textContent = isImageBlock
+              ? firstLine((msg.content && msg.content.prompt) || '(image)') || '(image)'
+              : (firstLine(msg.content || msg.reasoning || '(no content)') || '(no content)');
             main.appendChild(preview);
 
             const full = document.createElement('div');
@@ -1045,8 +1376,16 @@
             // Response content
             if (msg.content) {
               const respDiv = document.createElement('div');
-              respDiv.className = 've-md';
-              respDiv.setAttribute('data-md', 'response');
+              if (isImageBlock) {
+                respDiv.className = 've-image';
+                const p = msg.content.prompt ? String(msg.content.prompt) : '';
+                respDiv.innerHTML = `<pre style="margin:0 0 8px 0;">${escapeHtml(p || '(image)')}</pre>`;
+                renderImageThumbs(respDiv, chat.id, msg.content.reference_images);
+                renderImageThumbs(respDiv, chat.id, msg.content.images);
+              } else {
+                respDiv.className = 've-md';
+                respDiv.setAttribute('data-md', 'response');
+              }
               content.appendChild(respDiv);
             }
             
@@ -1136,7 +1475,7 @@
 
             // Render markdown (lazy-ish but minimal)
             const respMd = wrap.querySelector('[data-md="response"]');
-            if (respMd && msg.content) {
+            if (respMd && msg.content && typeof msg.content === 'string') {
               const html = (await renderMarkdownViaServer(msg.content)) || renderMarkdownFallback(msg.content);
               respMd.innerHTML = html;
             }
@@ -1881,6 +2220,18 @@
             closeSSE(pane);
           }
         });
+
+        // Non-streaming operations (image generation) request a full refresh.
+        ev.addEventListener('chat.refresh', async () => {
+          try {
+            const chat = await apiFetch(`/chat/${encodeURIComponent(pane.chatId)}`);
+            pane.chat = chat;
+            state.chat = chat;
+            pane.loaded = true;
+            pane.live = createLiveState();
+            await renderChat(pane, chat, true);
+          } catch {}
+        });
       };
 
       const sendMessage = async (pane) => {
@@ -1889,10 +2240,9 @@
         if (!String(text || '').trim()) return;
         const model_name = getSelectedModel();
         const reasoning_effort = getSelectedReasoningEffort();
-        const params = { message: text, model_name };
-        if (reasoning_effort && reasoning_effort !== 'default') {
-          params.reasoning_effort = reasoning_effort;
-        }
+        const imgMode = isImageGenModel(model_name);
+        const params = imgMode ? { prompt: text, model_name } : { message: text, model_name };
+        if (!imgMode && reasoning_effort && reasoning_effort !== 'default') params.reasoning_effort = reasoning_effort;
         setRunning(pane, true);
         ensureSSE(pane);
         pane.ta.value = '';
@@ -1901,7 +2251,8 @@
         pane.live.pendingUserEcho = String(text);
         liveAppendUserMessage(pane, String(text));
         try {
-          await apiFetch(`/chat/${encodeURIComponent(pane.chatId)}/send`, {
+          const endpoint = imgMode ? 'generate_image' : 'send';
+          await apiFetch(`/chat/${encodeURIComponent(pane.chatId)}/${endpoint}`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(params),
@@ -2357,6 +2708,36 @@
           return true;
         }
 
+        // GET /api/chat/:id/images/:imageId/data -> raw image bytes (in-memory base64)
+        const imageDataMatch = pathname.match(
+          new RegExp('^' + apiBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/chat/([^/]+)/images/([^/]+)/data$')
+        );
+        if (req.method === 'GET' && imageDataMatch) {
+          const chatId = decodeURIComponent(imageDataMatch[1]);
+          const imageId = decodeURIComponent(imageDataMatch[2]);
+          try {
+            const chat = ChatSession.load(chatId);
+            if (!chat) {
+              json(res, 404, { error: 'not found' });
+              return true;
+            }
+            const rec = (typeof chat.getImage === 'function') ? chat.getImage(imageId) : null;
+            const b64 = rec ? (rec.data_b64 ?? rec.data_base64 ?? rec.b64_json ?? rec.data ?? null) : null;
+            if (!rec || !b64) {
+              json(res, 404, { error: 'image not found' });
+              return true;
+            }
+            const ct = rec.mime_type && typeof rec.mime_type === 'string' ? rec.mime_type : 'application/octet-stream';
+            res.statusCode = 200;
+            res.setHeader('content-type', ct);
+            res.setHeader('cache-control', 'no-store');
+            res.end(Buffer.from(String(b64), 'base64'));
+          } catch (e) {
+            json(res, 500, { error: e.message || String(e) });
+          }
+          return true;
+        }
+
         // DELETE /api/chat/:id (delete persisted session file)
         if (req.method === 'DELETE' && chatMatch) {
           const chatId = decodeURIComponent(chatMatch[1]);
@@ -2713,6 +3094,83 @@
             })();
 
             json(res, 200, { success: true });
+          } catch (e) {
+            json(res, 500, { error: e.message || String(e) });
+          }
+          return true;
+        }
+
+        // POST /api/chat/:id/generate_image { prompt, model_name?, reference_image_ids?, options? }
+        const genMatch = pathname.match(
+          new RegExp('^' + apiBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/chat/([^/]+)/generate_image$')
+        );
+        if (req.method === 'POST' && genMatch) {
+          const chatId = decodeURIComponent(genMatch[1]);
+          try {
+            const body = await readJson(req);
+            const prompt = body.prompt;
+            if (typeof prompt !== 'string' || !prompt.trim()) {
+              json(res, 400, { error: 'prompt is required' });
+              return true;
+            }
+
+            const existing = runByChatId.get(String(chatId));
+            if (existing && existing.running) {
+              json(res, 409, { error: 'chat is already running' });
+              return true;
+            }
+
+            const chat = ChatSession.load(chatId);
+            if (!chat) {
+              json(res, 404, { error: 'not found' });
+              return true;
+            }
+
+            const model_name = (typeof body.model_name === 'string' && body.model_name.trim())
+              ? body.model_name.trim()
+              : chat.model_name;
+            if (model_name && model_name !== chat.model_name) {
+              chat.model_name = model_name;
+              chat.save();
+            }
+
+            const llm = (typeof viib.openChat === 'function')
+              ? viib.openChat(chatId, null, {})
+              : new ChatLLM(model_name || chat.model_name, chat, null, {});
+            runByChatId.set(String(chatId), { llm, running: true, startedAt: Date.now() });
+
+            emit(chatId, 'run.start', { ts: nowIso() });
+            emit(chatId, 'cycle.start', { ts: nowIso(), cycle_id: `cycle_${Date.now()}_1`, seq: 1 });
+            emit(chatId, 'chat.user', { content: String(prompt), ts: nowIso() });
+
+            const optionsObj = (body.options && typeof body.options === 'object') ? body.options : {};
+
+            // Optional explicit references by id
+            let referenceImages = null;
+            const refIds = Array.isArray(body.reference_image_ids) ? body.reference_image_ids : null;
+            if (refIds && refIds.length > 0 && typeof chat.getImage === 'function') {
+              const refs = [];
+              for (const rid of refIds) {
+                const rec = chat.getImage(rid);
+                const b64 = rec ? (rec.data_b64 ?? rec.data_base64 ?? rec.b64_json ?? rec.data ?? null) : null;
+                if (!rec || !b64) continue;
+                refs.push({ id: String(rid), mime_type: rec.mime_type || null, data_b64: String(b64) });
+              }
+              referenceImages = refs.length ? refs : null;
+            }
+
+            try {
+              const result = await llm.generateImage(String(prompt), referenceImages, optionsObj);
+              emit(chatId, 'chat.refresh', { ts: nowIso() });
+              emit(chatId, 'run.done', { ts: nowIso() });
+              json(res, 200, { success: true, result });
+            } catch (e) {
+              emit(chatId, 'run.error', { ts: nowIso(), error: e.message || String(e) });
+              json(res, 500, { error: e.message || String(e) });
+            } finally {
+              const r = runByChatId.get(String(chatId));
+              if (r) r.running = false;
+            }
           } catch (e) {
             json(res, 500, { error: e.message || String(e) });
           }
