@@ -19,6 +19,9 @@
       chatStorageKey: 'viib-etch.ui.chatId',
       autoScrollThresholdPx: 140,
       imageThumbPx: 64,
+      // Optional: Monaco Editor base URL (loads on demand in File Explorer).
+      // You can override with opts.monacoBaseUrl to use a local/cached copy.
+      monacoBaseUrl: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs',
     };
 
     const escapeHtml = (s) =>
@@ -63,6 +66,35 @@
         toolUi: new Map(),
         chatStatus: new Map(),
         chatMeta: new Map(),
+        // Global file explorer/editor window state
+        fileExplorer: {
+          backdropEl: null,
+          windowEl: null,
+          headerEl: null,
+          bodyEl: null,
+          sidebarEl: null,
+          editorEl: null, // fallback textarea
+          editorHostEl: null,
+          diffHostEl: null,
+          toolbarEl: null,
+          btnEditEl: null,
+          btnDiffEl: null,
+          // Monaco objects (optional; loaded lazily)
+          monaco: null,
+          monacoEditor: null,
+          monacoDiffEditor: null,
+          originalModel: null,
+          modifiedModel: null,
+          originalText: '',
+          currentPath: '',
+          viewOnly: true,
+          // Edit mode is fullscreen: hides list + dir bar.
+          editMode: false,
+          showDiff: false,
+          pathInputEl: null,
+          statusEl: null,
+          isMinimized: false,
+        },
       };
 
       const getToken = () => state.token || localStorage.getItem(options.tokenStorageKey) || '';
@@ -638,6 +670,9 @@
           .ve-field{display:flex;flex-direction:column;gap:6px;margin:10px 0;}
           .ve-field label{font-size:12px;opacity:0.75}
           .ve-input{background:#ffffff;border:1px solid rgba(17,24,39,0.14);color:#111827;border-radius:3px;padding:9px 10px;outline:none;font:16px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";}
+          /* Monaco: prevent iOS zoom on focus by ensuring input area is >=16px */
+          .monaco-editor, .monaco-diff-editor{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;}
+          .monaco-editor textarea.inputarea{font-size:16px !important; line-height:1.4 !important;}
         `;
         document.head.appendChild(style);
       }
@@ -1961,6 +1996,899 @@
         }
       };
 
+      const FILE_EXPLORER_STORAGE_KEY = 'viib-etch.ui.fileExplorer';
+
+      // Monaco (VS Code-like editor) is loaded lazily for the File Explorer editor.
+      // If it can't be loaded (offline/no CDN), we fall back to a textarea.
+      let _monacoPromise = null;
+      const loadMonaco = async () => {
+        if (typeof window !== 'undefined' && window.monaco && window.monaco.editor) {
+          return window.monaco;
+        }
+        if (_monacoPromise) return await _monacoPromise;
+        const base = String(options.monacoBaseUrl || '').replace(/\/+$/, '') || '';
+        if (!base) throw new Error('Monaco base URL not configured');
+
+        const loadScriptOnce = (src) => new Promise((resolve, reject) => {
+          try {
+            const existing = Array.from(document.querySelectorAll('script')).find((s) => s && s.src === src);
+            if (existing) {
+              existing.addEventListener('load', () => resolve());
+              existing.addEventListener('error', () => reject(new Error(`failed to load ${src}`)));
+              // If it's already loaded, resolve immediately.
+              if ((existing.readyState && existing.readyState === 'complete') || existing.getAttribute('data-loaded') === '1') {
+                resolve();
+              }
+              return;
+            }
+            const s = document.createElement('script');
+            s.src = src;
+            s.async = true;
+            s.addEventListener('load', () => { try { s.setAttribute('data-loaded', '1'); } catch {} resolve(); });
+            s.addEventListener('error', () => reject(new Error(`failed to load ${src}`)));
+            document.head.appendChild(s);
+          } catch (e) {
+            reject(e);
+          }
+        });
+
+        _monacoPromise = (async () => {
+          await loadScriptOnce(`${base}/loader.js`);
+          if (!window.require || !window.require.config) throw new Error('Monaco loader did not initialize');
+          window.require.config({ paths: { vs: base } });
+          await new Promise((resolve, reject) => {
+            try {
+              window.require(['vs/editor/editor.main'], () => resolve(), (err) => reject(err || new Error('failed to load monaco')));
+            } catch (e) {
+              reject(e);
+            }
+          });
+          if (!window.monaco || !window.monaco.editor) throw new Error('Monaco failed to load');
+          return window.monaco;
+        })();
+
+        return await _monacoPromise;
+      };
+
+      const inferMonacoLanguage = (p) => {
+        const s = String(p || '');
+        const dot = s.lastIndexOf('.');
+        const ext = dot !== -1 ? s.slice(dot + 1).toLowerCase() : '';
+        if (ext === 'js' || ext === 'mjs' || ext === 'cjs') return 'javascript';
+        if (ext === 'ts' || ext === 'tsx') return 'typescript';
+        if (ext === 'json') return 'json';
+        if (ext === 'md' || ext === 'markdown') return 'markdown';
+        if (ext === 'py') return 'python';
+        if (ext === 'css') return 'css';
+        if (ext === 'html' || ext === 'htm') return 'html';
+        if (ext === 'sh' || ext === 'bash') return 'shell';
+        if (ext === 'yml' || ext === 'yaml') return 'yaml';
+        if (ext === 'go') return 'go';
+        if (ext === 'rs') return 'rust';
+        if (ext === 'java') return 'java';
+        if (ext === 'cpp' || ext === 'cc' || ext === 'cxx' || ext === 'c' || ext === 'h' || ext === 'hpp') return 'cpp';
+        return 'plaintext';
+      };
+
+      const layoutFileExplorerEditors = () => {
+        const fe = state.fileExplorer;
+        try { if (fe.monacoEditor) fe.monacoEditor.layout(); } catch {}
+        try { if (fe.monacoDiffEditor) fe.monacoDiffEditor.layout(); } catch {}
+      };
+
+      const fileBaseName = (p) => {
+        const s = String(p || '');
+        const parts = s.split(/[\\/]/).filter(Boolean);
+        return parts.length ? parts[parts.length - 1] : s;
+      };
+
+      const loadFileExplorerPrefs = () => {
+        try {
+          const raw = localStorage.getItem(FILE_EXPLORER_STORAGE_KEY);
+          if (!raw) return {};
+          const obj = JSON.parse(raw);
+          return obj && typeof obj === 'object' ? obj : {};
+        } catch {
+          return {};
+        }
+      };
+
+      const saveFileExplorerPrefs = (next) => {
+        try {
+          const cur = loadFileExplorerPrefs();
+          const merged = Object.assign({}, cur, next || {});
+          localStorage.setItem(FILE_EXPLORER_STORAGE_KEY, JSON.stringify(merged));
+        } catch {}
+      };
+
+      const ensureFileExplorerWindow = () => {
+        const fe = state.fileExplorer;
+        if (fe.windowEl && fe.windowEl.parentNode) return fe;
+
+        const prefs = loadFileExplorerPrefs();
+
+        const backdrop = document.createElement('div');
+        backdrop.style.position = 'fixed';
+        backdrop.style.inset = '0';
+        backdrop.style.zIndex = '40';
+        backdrop.style.pointerEvents = 'none';
+        // Keep typography consistent with .ve-root (the window is attached to <body>, not inside root).
+        backdrop.style.font = '13px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji"';
+
+        const win = document.createElement('div');
+        win.setAttribute('data-ve-file-window', '1');
+        win.style.position = 'absolute';
+        win.style.background = '#ffffff';
+        win.style.border = '1px solid rgba(17,24,39,0.14)';
+        win.style.borderRadius = '3px';
+        win.style.boxShadow = '0 16px 40px rgba(0,0,0,0.20)';
+        win.style.display = 'flex';
+        win.style.flexDirection = 'column';
+        win.style.overflow = 'hidden';
+        win.style.touchAction = 'none';
+        win.style.font = 'inherit';
+
+        const defaultWidth = Math.min(window.innerWidth * 0.8, 880);
+        const defaultHeight = Math.min(window.innerHeight * 0.7, 520);
+        const minWidth = Math.max(260, Math.min(window.innerWidth * 0.6, 420));
+        const maxWidth = Math.min(window.innerWidth * 0.95, 960);
+        const minHeight = Math.max(220, Math.min(window.innerHeight * 0.4, 320));
+        const maxHeight = Math.min(window.innerHeight * 0.95, 720);
+
+        const w = prefs.width && prefs.width > 0 ? Math.min(Math.max(prefs.width, minWidth), maxWidth) : defaultWidth;
+        const h = prefs.height && prefs.height > 0 ? Math.min(Math.max(prefs.height, minHeight), maxHeight) : defaultHeight;
+        const l = prefs.left && prefs.left >= 0 ? Math.min(prefs.left, window.innerWidth - w - 8) : Math.max(8, window.innerWidth - w - 24);
+        const t = prefs.top && prefs.top >= 0 ? Math.min(prefs.top, window.innerHeight - h - 8) : Math.max(48, window.innerHeight - h - 24);
+
+        win.style.width = `${w}px`;
+        win.style.height = `${h}px`;
+        win.style.left = `${l}px`;
+        win.style.top = `${t}px`;
+
+        const header = document.createElement('div');
+        header.style.display = 'flex';
+        header.style.alignItems = 'center';
+        header.style.justifyContent = 'space-between';
+        header.style.gap = '8px';
+        header.style.padding = '8px 10px';
+        header.style.borderBottom = '1px solid rgba(17,24,39,0.10)';
+        header.style.background = '#f9fafb';
+        header.style.cursor = 'move';
+
+        const title = document.createElement('div');
+        title.textContent = 'File Explorer';
+        title.className = 've-muted';
+        title.style.fontSize = '12px';
+        title.style.flex = '1 1 auto';
+        title.style.whiteSpace = 'nowrap';
+        title.style.overflow = 'hidden';
+        title.style.textOverflow = 'ellipsis';
+
+        const headerActions = document.createElement('div');
+        headerActions.style.display = 'flex';
+        headerActions.style.gap = '6px';
+
+        const btnMin = document.createElement('button');
+        btnMin.type = 'button';
+        btnMin.className = 've-iconbtn';
+        btnMin.textContent = '▁';
+        btnMin.title = 'Minimize';
+        btnMin.style.minWidth = '22px';
+        btnMin.style.padding = '4px 8px';
+        btnMin.style.lineHeight = '1';
+
+        const btnClose = document.createElement('button');
+        btnClose.type = 'button';
+        btnClose.className = 've-iconbtn';
+        btnClose.textContent = '✕';
+        btnClose.title = 'Close';
+        btnClose.style.minWidth = '22px';
+        btnClose.style.padding = '4px 8px';
+        btnClose.style.lineHeight = '1';
+
+        headerActions.appendChild(btnMin);
+        headerActions.appendChild(btnClose);
+        header.appendChild(title);
+        header.appendChild(headerActions);
+
+        const topRow = document.createElement('div');
+        topRow.style.display = 'flex';
+        topRow.style.alignItems = 'center';
+        topRow.style.gap = '8px';
+        topRow.style.padding = '6px 10px 6px 10px';
+        topRow.style.borderBottom = '1px solid rgba(17,24,39,0.06)';
+        topRow.style.background = '#ffffff';
+
+        const pathLabel = document.createElement('span');
+        pathLabel.textContent = 'Dir';
+        pathLabel.className = 've-muted';
+        pathLabel.style.fontSize = '12px';
+        pathLabel.style.flexShrink = '0';
+
+        const pathInput = document.createElement('input');
+        pathInput.type = 'text';
+        pathInput.className = 've-input';
+        pathInput.style.flex = '1 1 auto';
+        pathInput.style.minWidth = '0';
+        pathInput.placeholder = 'Working directory';
+
+        const status = document.createElement('div');
+        status.className = 've-muted';
+        status.style.fontSize = '11px';
+        status.style.flexShrink = '0';
+        status.style.whiteSpace = 'nowrap';
+        status.textContent = '';
+
+        topRow.appendChild(pathLabel);
+        topRow.appendChild(pathInput);
+        topRow.appendChild(status);
+
+        const body = document.createElement('div');
+        body.style.display = 'flex';
+        body.style.flex = '1 1 auto';
+        body.style.minHeight = '0';
+        body.style.background = '#f9fafb';
+
+        const sidebar = document.createElement('div');
+        sidebar.style.flex = '0 0 auto';
+        sidebar.style.width = isMobile() ? '40%' : '32%';
+        sidebar.style.minWidth = '140px';
+        sidebar.style.maxWidth = '420px';
+        sidebar.style.borderRight = '1px solid rgba(17,24,39,0.06)';
+        sidebar.style.background = '#ffffff';
+        sidebar.style.display = 'flex';
+        sidebar.style.flexDirection = 'column';
+
+        const list = document.createElement('div');
+        list.setAttribute('data-ve-file-list', '1');
+        list.style.flex = '1 1 auto';
+        list.style.minHeight = '0';
+        list.style.overflow = 'auto';
+        list.style.padding = '4px 0';
+        // iOS: slightly smaller file list text.
+        if (isMobile()) list.style.fontSize = '12px';
+
+        sidebar.appendChild(list);
+
+        const editorWrap = document.createElement('div');
+        editorWrap.style.flex = '1 1 auto';
+        editorWrap.style.minWidth = '0';
+        editorWrap.style.display = 'flex';
+        editorWrap.style.flexDirection = 'column';
+
+        const editorToolbar = document.createElement('div');
+        editorToolbar.style.display = 'flex';
+        editorToolbar.style.alignItems = 'center';
+        editorToolbar.style.gap = '8px';
+        editorToolbar.style.padding = '6px 8px';
+        editorToolbar.style.borderBottom = '1px solid rgba(17,24,39,0.06)';
+        editorToolbar.style.background = '#ffffff';
+
+        const btnEdit = document.createElement('button');
+        btnEdit.type = 'button';
+        btnEdit.className = 've-iconbtn';
+        btnEdit.textContent = fe.viewOnly ? 'Edit' : 'View';
+        btnEdit.title = 'Toggle view-only';
+        btnEdit.style.minWidth = '52px';
+
+        const btnSave = document.createElement('button');
+        btnSave.type = 'button';
+        btnSave.className = 've-iconbtn';
+        btnSave.textContent = 'Save';
+        btnSave.title = 'Save file';
+        btnSave.style.minWidth = '52px';
+        btnSave.style.display = 'none';
+
+        const editorToolbarSpacer = document.createElement('div');
+        editorToolbarSpacer.style.flex = '1 1 auto';
+
+        editorToolbar.appendChild(btnEdit);
+        editorToolbar.appendChild(btnSave);
+        editorToolbar.appendChild(editorToolbarSpacer);
+
+        const editorHost = document.createElement('div');
+        editorHost.setAttribute('data-ve-editor-host', '1');
+        editorHost.style.flex = '1 1 auto';
+        editorHost.style.minHeight = '0';
+        editorHost.style.margin = '8px 8px 10px 8px';
+        editorHost.style.border = '1px solid rgba(17,24,39,0.14)';
+        editorHost.style.borderRadius = '3px';
+        editorHost.style.background = '#ffffff';
+        editorHost.style.display = 'none'; // shown when Monaco is available
+
+        const diffHost = document.createElement('div');
+        diffHost.setAttribute('data-ve-diff-host', '1');
+        diffHost.style.flex = '1 1 auto';
+        diffHost.style.minHeight = '0';
+        diffHost.style.margin = '8px 8px 10px 8px';
+        diffHost.style.border = '1px solid rgba(17,24,39,0.14)';
+        diffHost.style.borderRadius = '3px';
+        diffHost.style.background = '#ffffff';
+        diffHost.style.display = 'none';
+
+        const editor = document.createElement('textarea');
+        editor.className = 've-textarea';
+        editor.style.flex = '1 1 auto';
+        editor.style.margin = '8px 8px 10px 8px';
+        editor.style.resize = 'none';
+        editor.placeholder = 'Select a file to view/edit…';
+        editor.readOnly = !!fe.viewOnly;
+        // Make fallback textarea look like a code editor (also helps iOS if Monaco can't load).
+        editor.style.fontFamily =
+          'ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace';
+        // Use >=16px to avoid iOS Safari zooming on focus.
+        editor.style.fontSize = '16px';
+
+        const applyEditorLayoutState = () => {
+          // View-only mode: show file list + dir bar (right-side panel editor).
+          // Edit mode: editor occupies whole window (keep header).
+          const isEdit = !!fe.editMode;
+          try { sidebar.style.display = isEdit ? 'none' : 'flex'; } catch {}
+          try { topRow.style.display = isEdit ? 'none' : 'flex'; } catch {}
+          try {
+            editorHost.style.margin = isEdit ? '0' : '8px 8px 10px 8px';
+            diffHost.style.margin = isEdit ? '0' : '8px 8px 10px 8px';
+            editor.style.margin = isEdit ? '0' : '8px 8px 10px 8px';
+          } catch {}
+          layoutFileExplorerEditors();
+        };
+
+        const applyEditorMode = () => {
+          // Update buttons
+          btnEdit.textContent = fe.viewOnly ? 'Edit' : 'View';
+          btnSave.style.display = fe.editMode ? 'inline-flex' : 'none';
+          btnSave.disabled = !fe.editMode || !fe.currentPath;
+
+          // Textarea fallback
+          try { editor.readOnly = !!fe.viewOnly; } catch {}
+
+          const hasMonaco = !!(fe.monacoEditor && fe.monacoDiffEditor);
+          if (!hasMonaco) {
+            editor.style.display = 'block';
+            editorHost.style.display = 'none';
+            diffHost.style.display = 'none';
+            applyEditorLayoutState();
+            return;
+          }
+
+          editor.style.display = 'none';
+          editorHost.style.display = 'block';
+          diffHost.style.display = 'none';
+          applyEditorLayoutState();
+          try {
+            fe.monacoEditor.updateOptions({
+              readOnly: !!fe.viewOnly,
+              lineNumbers: fe.viewOnly ? 'off' : 'on',
+            });
+          } catch {}
+          layoutFileExplorerEditors();
+        };
+        // Expose for file-load path (Monaco may become available after window creation).
+        fe._applyEditorMode = applyEditorMode;
+
+        btnEdit.addEventListener('click', () => {
+          // Clicking Edit enters fullscreen edit mode. Clicking again returns to view-only right panel.
+          fe.editMode = !fe.editMode;
+          fe.viewOnly = !fe.editMode;
+          try {
+            if (fe.monacoEditor) fe.monacoEditor.updateOptions({ readOnly: !!fe.viewOnly, lineNumbers: fe.viewOnly ? 'off' : 'on' });
+          } catch {}
+          try {
+            if (fe.monacoDiffEditor && typeof fe.monacoDiffEditor.getModifiedEditor === 'function') {
+              fe.monacoDiffEditor.getModifiedEditor().updateOptions({ readOnly: !!fe.viewOnly });
+            }
+          } catch {}
+          applyEditorMode();
+        });
+
+        btnSave.addEventListener('click', () => {
+          const pane = getActivePane();
+          if (!pane || !pane.chatId) return;
+          if (!fe.currentPath) return;
+          if (!fe.editMode) return;
+          const getCurrentText = () => {
+            try {
+              if (fe.modifiedModel && typeof fe.modifiedModel.getValue === 'function') return fe.modifiedModel.getValue();
+            } catch {}
+            try { return fe.editorEl ? String(fe.editorEl.value || '') : ''; } catch {}
+            return '';
+          };
+          const nextText = getCurrentText();
+          apiFetch(`/chat/${encodeURIComponent(pane.chatId)}/file`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ path: fe.currentPath, content: nextText }),
+          })
+            .then(() => {
+              // Reset baseline to saved content.
+              fe.originalText = String(nextText || '');
+              try {
+                if (fe.originalModel) fe.originalModel.setValue(fe.originalText);
+                if (fe.modifiedModel) fe.modifiedModel.setValue(fe.originalText);
+              } catch {}
+              updateFileExplorerStatus(`Saved ${fileBaseName(fe.currentPath)}`);
+            })
+            .catch((e) => updateFileExplorerStatus(String(e && e.message ? e.message : e)));
+        });
+
+        editorWrap.appendChild(editorToolbar);
+        editorWrap.appendChild(editorHost);
+        editorWrap.appendChild(diffHost);
+        editorWrap.appendChild(editor);
+
+        body.appendChild(sidebar);
+        body.appendChild(editorWrap);
+
+        win.appendChild(header);
+        win.appendChild(topRow);
+        win.appendChild(body);
+        backdrop.appendChild(win);
+        document.body.appendChild(backdrop);
+
+        backdrop.style.pointerEvents = 'none';
+        win.style.pointerEvents = 'auto';
+
+        let isDragging = false;
+        let dragStartX = 0;
+        let dragStartY = 0;
+        let dragStartLeft = 0;
+        let dragStartTop = 0;
+
+        const onPointerMove = (ev) => {
+          if (!isDragging) return;
+          ev.preventDefault();
+          ev.stopPropagation();
+          const dx = ev.clientX - dragStartX;
+          const dy = ev.clientY - dragStartY;
+          let nl = dragStartLeft + dx;
+          let nt = dragStartTop + dy;
+          nl = Math.min(Math.max(nl, 4), window.innerWidth - win.offsetWidth - 4);
+          nt = Math.min(Math.max(nt, 4), window.innerHeight - win.offsetHeight - 4);
+          win.style.left = `${nl}px`;
+          win.style.top = `${nt}px`;
+        };
+
+        const onPointerUp = (ev) => {
+          if (!isDragging) return;
+          isDragging = false;
+          document.removeEventListener('pointermove', onPointerMove);
+          document.removeEventListener('pointerup', onPointerUp);
+          try { header.releasePointerCapture(ev.pointerId); } catch {}
+          saveFileExplorerPrefs({
+            left: parseFloat(win.style.left || '0') || 0,
+            top: parseFloat(win.style.top || '0') || 0,
+          });
+        };
+
+        const onPointerDown = (ev) => {
+          if (ev.button !== 0 && ev.pointerType !== 'touch') return;
+          // Don't start dragging when clicking window controls (minimize/close).
+          try {
+            const tgt = ev.target;
+            if (tgt && headerActions && headerActions.contains(tgt)) return;
+          } catch {}
+          ev.preventDefault();
+          ev.stopPropagation();
+          isDragging = true;
+          dragStartX = ev.clientX;
+          dragStartY = ev.clientY;
+          dragStartLeft = win.offsetLeft;
+          dragStartTop = win.offsetTop;
+          try { header.setPointerCapture(ev.pointerId); } catch {}
+          document.addEventListener('pointermove', onPointerMove);
+          document.addEventListener('pointerup', onPointerUp);
+        };
+
+        header.addEventListener('pointerdown', onPointerDown);
+
+        const resizeHandle = document.createElement('div');
+        resizeHandle.style.position = 'absolute';
+        resizeHandle.style.right = '0';
+        resizeHandle.style.bottom = '0';
+        resizeHandle.style.width = '16px';
+        resizeHandle.style.height = '16px';
+        resizeHandle.style.cursor = 'nwse-resize';
+        resizeHandle.style.background = 'transparent';
+        win.appendChild(resizeHandle);
+
+        let isResizing = false;
+        let resizeStartX = 0;
+        let resizeStartY = 0;
+        let resizeStartW = 0;
+        let resizeStartH = 0;
+
+        const onResizeMove = (ev) => {
+          if (!isResizing) return;
+          ev.preventDefault();
+          ev.stopPropagation();
+          const dx = ev.clientX - resizeStartX;
+          const dy = ev.clientY - resizeStartY;
+          let nw = resizeStartW + dx;
+          let nh = resizeStartH + dy;
+          const cw = window.innerWidth;
+          const ch = window.innerHeight;
+          const minW = Math.max(260, Math.min(cw * 0.6, 420));
+          const maxW = Math.min(cw * 0.95, 960);
+          const minH = Math.max(220, Math.min(ch * 0.4, 320));
+          const maxH = Math.min(ch * 0.95, 720);
+          nw = Math.min(Math.max(nw, minW), maxW);
+          nh = Math.min(Math.max(nh, minH), maxH);
+          win.style.width = `${nw}px`;
+          win.style.height = `${nh}px`;
+          layoutFileExplorerEditors();
+        };
+
+        const onResizeUp = (ev) => {
+          if (!isResizing) return;
+          isResizing = false;
+          document.removeEventListener('pointermove', onResizeMove);
+          document.removeEventListener('pointerup', onResizeUp);
+          try { resizeHandle.releasePointerCapture(ev.pointerId); } catch {}
+          saveFileExplorerPrefs({
+            width: win.offsetWidth,
+            height: win.offsetHeight,
+          });
+          layoutFileExplorerEditors();
+        };
+
+        const onResizeDown = (ev) => {
+          if (ev.button !== 0 && ev.pointerType !== 'touch') return;
+          ev.preventDefault();
+          ev.stopPropagation();
+          isResizing = true;
+          resizeStartX = ev.clientX;
+          resizeStartY = ev.clientY;
+          resizeStartW = win.offsetWidth;
+          resizeStartH = win.offsetHeight;
+          try { resizeHandle.setPointerCapture(ev.pointerId); } catch {}
+          document.addEventListener('pointermove', onResizeMove);
+          document.addEventListener('pointerup', onResizeUp);
+        };
+
+        resizeHandle.addEventListener('pointerdown', onResizeDown);
+
+        const applyMinimizedState = (min) => {
+          fe.isMinimized = !!min;
+          if (min) {
+            body.style.display = 'none';
+            topRow.style.display = 'none';
+            win.style.height = '44px';
+            btnMin.title = 'Restore';
+          } else {
+            body.style.display = 'flex';
+            topRow.style.display = 'flex';
+            win.style.height = `${h}px`;
+            btnMin.title = 'Minimize';
+          }
+          saveFileExplorerPrefs({ minimized: !!min });
+          if (!min) layoutFileExplorerEditors();
+        };
+
+        btnMin.addEventListener('click', () => {
+          applyMinimizedState(!fe.isMinimized);
+        });
+
+        const closeWindow = () => {
+          try {
+            if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
+          } catch {}
+          // Dispose Monaco objects/models (best-effort).
+          try { if (fe.monacoEditor) fe.monacoEditor.dispose(); } catch {}
+          try { if (fe.monacoDiffEditor) fe.monacoDiffEditor.dispose(); } catch {}
+          try { if (fe.originalModel) fe.originalModel.dispose(); } catch {}
+          try { if (fe.modifiedModel) fe.modifiedModel.dispose(); } catch {}
+          fe.backdropEl = null;
+          fe.windowEl = null;
+          fe.headerEl = null;
+          fe.bodyEl = null;
+          fe.sidebarEl = null;
+          fe.editorEl = null;
+          fe.editorHostEl = null;
+          fe.diffHostEl = null;
+          fe.toolbarEl = null;
+          fe.btnEditEl = null;
+          fe.btnDiffEl = null;
+          fe.btnSaveEl = null;
+          fe.monacoEditor = null;
+          fe.monacoDiffEditor = null;
+          fe.originalModel = null;
+          fe.modifiedModel = null;
+          fe.originalText = '';
+          fe.currentPath = '';
+          fe.editMode = false;
+          fe._applyEditorMode = null;
+          fe.pathInputEl = null;
+          fe.statusEl = null;
+        };
+
+        btnClose.addEventListener('click', closeWindow);
+
+        fe.backdropEl = backdrop;
+        fe.windowEl = win;
+        fe.headerEl = header;
+        fe.bodyEl = list;
+        fe.sidebarEl = sidebar;
+        fe.editorEl = editor;
+        fe.editorHostEl = editorHost;
+        fe.diffHostEl = diffHost;
+        fe.toolbarEl = editorToolbar;
+        fe.btnEditEl = btnEdit;
+        fe.btnDiffEl = null;
+        fe.btnSaveEl = btnSave;
+        fe.pathInputEl = pathInput;
+        fe.statusEl = status;
+
+        if (prefs.directory) {
+          pathInput.value = String(prefs.directory);
+        }
+        if (prefs.minimized) {
+          applyMinimizedState(true);
+        }
+
+        return fe;
+      };
+
+      const updateFileExplorerStatus = (text) => {
+        const fe = ensureFileExplorerWindow();
+        if (fe.statusEl) fe.statusEl.textContent = text || '';
+      };
+
+      const renderFileList = (entries, currentDir) => {
+        const fe = ensureFileExplorerWindow();
+        const list = fe.bodyEl;
+        if (!list) return;
+        list.innerHTML = '';
+        const ul = document.createElement('div');
+        ul.style.display = 'flex';
+        ul.style.flexDirection = 'column';
+        ul.style.padding = '0';
+        ul.style.margin = '0';
+
+        const makeRow = (label, meta, onClick) => {
+          const row = document.createElement('button');
+          row.type = 'button';
+          row.style.display = 'flex';
+          row.style.alignItems = 'center';
+          row.style.justifyContent = 'space-between';
+          row.style.padding = '4px 10px';
+          row.style.border = 'none';
+          row.style.background = 'transparent';
+          row.style.textAlign = 'left';
+          row.style.cursor = 'pointer';
+          row.style.font = 'inherit';
+          row.style.borderRadius = '0';
+          row.addEventListener('mouseover', () => { row.style.background = '#f3f4f6'; });
+          row.addEventListener('mouseout', () => { row.style.background = 'transparent'; });
+          row.addEventListener('click', () => { if (onClick) onClick(); });
+
+          const left = document.createElement('div');
+          left.style.display = 'flex';
+          left.style.alignItems = 'center';
+          left.style.gap = '6px';
+
+          const icon = document.createElement('span');
+          icon.textContent = meta && meta.icon ? meta.icon : '';
+          icon.style.flexShrink = '0';
+
+          const text = document.createElement('span');
+          text.textContent = label;
+          text.style.whiteSpace = 'nowrap';
+          text.style.overflow = 'hidden';
+          text.style.textOverflow = 'ellipsis';
+
+          left.appendChild(icon);
+          left.appendChild(text);
+
+          const right = document.createElement('div');
+          right.className = 've-muted';
+          right.style.fontSize = '11px';
+          right.textContent = meta && meta.suffix ? meta.suffix : '';
+
+          row.appendChild(left);
+          row.appendChild(right);
+          ul.appendChild(row);
+        };
+
+        // Add a ".." row to go to the parent directory.
+        const parentDirOf = (p) => {
+          const raw = String(p || '').trim();
+          if (!raw || raw === '.' || raw === '/' || raw === '\\') return null;
+          const s = raw.replace(/[\\/]+$/, '');
+          if (!s) return null;
+          const lastSlash = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+          if (lastSlash <= 0) return s.startsWith('/') ? '/' : '.';
+          return s.slice(0, lastSlash);
+        };
+        const curDir = String(currentDir || (fe.pathInputEl && fe.pathInputEl.value) || '').trim();
+        const parent = parentDirOf(curDir);
+        if (parent && parent !== curDir) {
+          makeRow('..', { icon: '⬆️', suffix: '' }, () => {
+            const fe2 = ensureFileExplorerWindow();
+            if (fe2.pathInputEl) fe2.pathInputEl.value = parent;
+            saveFileExplorerPrefs({ directory: parent });
+            openFileExplorerAtDir(parent);
+          });
+        }
+
+        for (const ent of entries || []) {
+          if (!ent || !ent.name) continue;
+          const isDir = !!ent.isDirectory;
+          const label = ent.name;
+          const meta = { icon: isDir ? '📂' : '📄', suffix: ent.size != null ? String(ent.size) : '' };
+          const fullPath = ent.path || label;
+          makeRow(label, meta, () => {
+            if (isDir) {
+              const fe2 = ensureFileExplorerWindow();
+              if (fe2.pathInputEl) {
+                fe2.pathInputEl.value = fullPath;
+              }
+              saveFileExplorerPrefs({ directory: fullPath });
+              openFileExplorerAtDir(fullPath);
+            } else {
+              openFileInEditor(fullPath);
+            }
+          });
+        }
+
+        list.appendChild(ul);
+        updateFileExplorerStatus(entries && entries.length ? `${entries.length} entries` : 'Empty');
+      };
+
+      const openFileExplorerAtDir = async (dir) => {
+        const pane = getActivePane();
+        if (!pane || !pane.chatId) {
+          alert('Open a chat first to use the file explorer.');
+          return;
+        }
+        ensureFileExplorerWindow();
+        const targetDir = String(dir || '').trim() || (pane.chat && pane.chat.base_dir) || '.';
+        const args = { target_directory: targetDir, ignore_globs: [] };
+        try {
+          const res = await apiFetch(`/chat/${encodeURIComponent(pane.chatId)}/tool`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              tool_name: 'list_dir',
+              arguments: args,
+            }),
+          });
+          const raw = typeof res === 'string' ? res : (res && res.content) ? String(res.content) : '';
+          const lines = String(raw || '').split('\n');
+          const dirLine = (lines[0] || '').trim();
+          const baseDir = dirLine.endsWith('/') ? dirLine.slice(0, -1) : (dirLine || targetDir);
+          const joinPath = (base, name) => {
+            const b = String(base || '');
+            if (!b) return String(name || '');
+            if (b.endsWith('/') || b.endsWith('\\')) return b + String(name || '');
+            return b + '/' + String(name || '');
+          };
+          const entries = [];
+          for (const line of lines.slice(1)) {
+            const t = String(line || '').trim();
+            if (!t.startsWith('- ')) continue;
+            let name = t.slice(2).trim();
+            if (!name) continue;
+            const isDir = name.endsWith('/');
+            if (isDir) name = name.slice(0, -1);
+            const fullPath = joinPath(baseDir, name);
+            entries.push({ name, isDirectory: isDir, path: fullPath });
+          }
+          renderFileList(entries, baseDir);
+          // Normalize the input box to the resolved directory.
+          try {
+            const fe = ensureFileExplorerWindow();
+            if (fe.pathInputEl) fe.pathInputEl.value = baseDir;
+          } catch {}
+          saveFileExplorerPrefs({ directory: baseDir });
+        } catch (e) {
+          updateFileExplorerStatus(String(e && e.message ? e.message : e));
+        }
+      };
+
+      const openFileInEditor = async (pathStr) => {
+        const pane = getActivePane();
+        if (!pane || !pane.chatId) {
+          alert('Open a chat first to edit files.');
+          return;
+        }
+        const fe = ensureFileExplorerWindow();
+        // Default on open: view-only editor on the right-side panel.
+        fe.viewOnly = true;
+        fe.editMode = false;
+        if (fe.editorEl) {
+          fe.editorEl.value = 'Loading…';
+        }
+        try {
+          const res = await apiFetch(
+            `/chat/${encodeURIComponent(pane.chatId)}/file?path=${encodeURIComponent(String(pathStr || ''))}`,
+            { method: 'GET' },
+          );
+          const content = typeof res === 'string' ? res : (res && res.content) || '';
+          fe.currentPath = String(pathStr || '');
+          fe.originalText = String(content || '');
+
+          // Always populate the textarea immediately (fallback + fast render).
+          if (fe.editorEl) {
+            fe.editorEl.value = fe.originalText;
+          }
+
+          // Try to upgrade to Monaco (syntax highlighting + diff) lazily.
+          (async () => {
+            try {
+              const host = fe.editorHostEl;
+              const diffHost = fe.diffHostEl;
+              if (!host || !diffHost) return;
+
+              const monaco = fe.monaco || (await loadMonaco());
+              fe.monaco = monaco;
+
+              if (!fe.monacoEditor) {
+                fe.monacoEditor = monaco.editor.create(host, {
+                  value: '',
+                  language: 'plaintext',
+                  theme: 'vs',
+                  minimap: { enabled: false },
+                  scrollBeyondLastLine: false,
+                  automaticLayout: false,
+                  readOnly: !!fe.viewOnly,
+                  lineNumbers: fe.viewOnly ? 'off' : 'on',
+                  wordWrap: 'on',
+                  // iOS: render smaller, keep inputarea at 16px via CSS to avoid zoom.
+                  fontSize: isMobile() ? 12 : 13,
+                  fontFamily:
+                    'ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace',
+                });
+              }
+              if (!fe.monacoDiffEditor) {
+                fe.monacoDiffEditor = monaco.editor.createDiffEditor(diffHost, {
+                  theme: 'vs',
+                  minimap: { enabled: false },
+                  scrollBeyondLastLine: false,
+                  automaticLayout: false,
+                  readOnly: !!fe.viewOnly,
+                  renderSideBySide: true,
+                });
+                try {
+                  const me = fe.monacoDiffEditor.getModifiedEditor();
+                  me.updateOptions({ readOnly: !!fe.viewOnly });
+                } catch {}
+              }
+
+              // Dispose prior models (avoid leaks).
+              try { if (fe.originalModel) fe.originalModel.dispose(); } catch {}
+              try { if (fe.modifiedModel) fe.modifiedModel.dispose(); } catch {}
+              fe.originalModel = null;
+              fe.modifiedModel = null;
+
+              const lang = inferMonacoLanguage(fe.currentPath);
+              const uriBase = `inmemory://model/${Date.now()}_${Math.random().toString(16).slice(2)}/${encodeURIComponent(fe.currentPath || 'file')}`;
+              fe.originalModel = monaco.editor.createModel(fe.originalText, lang, monaco.Uri.parse(uriBase + '?o=1'));
+              fe.modifiedModel = monaco.editor.createModel(fe.originalText, lang, monaco.Uri.parse(uriBase + '?m=1'));
+
+              try { fe.monacoEditor.updateOptions({ readOnly: !!fe.viewOnly }); } catch {}
+              try {
+                if (fe.monacoDiffEditor && typeof fe.monacoDiffEditor.getModifiedEditor === 'function') {
+                  fe.monacoDiffEditor.getModifiedEditor().updateOptions({ readOnly: !!fe.viewOnly });
+                }
+              } catch {}
+
+              try { fe.monacoEditor.setModel(fe.modifiedModel); } catch {}
+              try { fe.monacoDiffEditor.setModel({ original: fe.originalModel, modified: fe.modifiedModel }); } catch {}
+
+              if (typeof fe._applyEditorMode === 'function') fe._applyEditorMode();
+              layoutFileExplorerEditors();
+            } catch {
+              // If Monaco fails to load, keep textarea fallback.
+            }
+          })();
+
+          updateFileExplorerStatus(fileBaseName(pathStr || ''));
+        } catch (e) {
+          if (fe.editorEl) fe.editorEl.value = '';
+          updateFileExplorerStatus(String(e && e.message ? e.message : e));
+        }
+      };
+
       const openChatTabMenu = (evt, chatSummary) => {
         evt.preventDefault();
         const id = String(chatSummary.id);
@@ -2002,6 +2930,13 @@
           item.addEventListener('mouseout', () => { item.style.background = 'transparent'; });
           return item;
         };
+        menu.appendChild(makeItem('Explore…', () => {
+          const pane = getActivePane();
+          const fe = ensureFileExplorerWindow();
+          const base = pane && pane.chat && pane.chat.base_dir ? String(pane.chat.base_dir) : '';
+          if (fe.pathInputEl && base) fe.pathInputEl.value = base;
+          openFileExplorerAtDir(base || '.');
+        }));
         menu.appendChild(makeItem('Rename', () => {
           const currentTitle = chatSummary.title || 'New Chat';
           const next = prompt('New title', currentTitle);
@@ -2855,6 +3790,7 @@
       // Lazy require to keep mountable usage lightweight
       const viib = require(path.join(__dirname, 'viib-etch.js'));
       const { ChatModel, ChatSession, ChatLLM } = viib;
+      const { executeTool } = require(path.join(__dirname, 'viib-etch-tools.js'));
 
       if (modelsFile) {
         try { viib.setModelsFileName(modelsFile); } catch {}
@@ -2966,6 +3902,164 @@
               return true;
             }
             json(res, 200, chat);
+          } catch (e) {
+            json(res, 500, { error: e.message || String(e) });
+          }
+          return true;
+        }
+
+        // POST /api/chat/:id/tool { tool_name, arguments } -> result (json or text)
+        const toolMatch = pathname.match(
+          new RegExp('^' + apiBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/chat/([^/]+)/tool$')
+        );
+        if (req.method === 'POST' && toolMatch) {
+          const chatId = decodeURIComponent(toolMatch[1]);
+          try {
+            const body = await readJson(req);
+            const tool_name = body && body.tool_name ? String(body.tool_name) : '';
+            const argsIn = body && body.arguments && typeof body.arguments === 'object' ? body.arguments : {};
+            if (!tool_name) {
+              json(res, 400, { error: 'tool_name is required' });
+              return true;
+            }
+            const chat = ChatSession.load(chatId);
+            if (!chat) {
+              json(res, 404, { error: 'not found' });
+              return true;
+            }
+
+            const base_dir =
+              chat && typeof chat.base_dir === 'string' && chat.base_dir.trim()
+                ? chat.base_dir.trim()
+                : null;
+
+            // Minimal safety: scope relative paths to chat.base_dir when present.
+            const args = Object.assign({}, argsIn || {});
+            const resolveRel = (p) => {
+              const s = String(p || '');
+              if (!s) return s;
+              if (!base_dir) return s;
+              if (path.isAbsolute(s)) return s;
+              return path.resolve(base_dir, s);
+            };
+            if (tool_name === 'read_file' || tool_name === 'delete_file') {
+              if (typeof args.target_file === 'string') args.target_file = resolveRel(args.target_file);
+            }
+            if (tool_name === 'list_dir') {
+              if (typeof args.target_directory === 'string') args.target_directory = resolveRel(args.target_directory);
+            }
+            if (tool_name === 'glob_file_search') {
+              if (typeof args.target_directory === 'string') args.target_directory = resolveRel(args.target_directory);
+            }
+            if (tool_name === 'rg') {
+              if (typeof args.path === 'string') args.path = resolveRel(args.path);
+            }
+
+            const result = await executeTool(tool_name, args, { session: chat });
+            if (typeof result === 'string') {
+              text(res, 200, result, 'text/plain');
+              return true;
+            }
+            json(res, 200, result);
+          } catch (e) {
+            json(res, 500, { error: e.message || String(e) });
+          }
+          return true;
+        }
+
+        // GET /api/chat/:id/file?path=... -> raw file text (scoped to chat.base_dir when set)
+        const fileMatch = pathname.match(
+          new RegExp('^' + apiBase.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '/chat/([^/]+)/file$')
+        );
+        if (req.method === 'GET' && fileMatch) {
+          const chatId = decodeURIComponent(fileMatch[1]);
+          const reqPath = query && typeof query.path === 'string' ? String(query.path) : '';
+          if (!reqPath.trim()) {
+            json(res, 400, { error: 'path is required' });
+            return true;
+          }
+          try {
+            const chat = ChatSession.load(chatId);
+            if (!chat) {
+              json(res, 404, { error: 'not found' });
+              return true;
+            }
+
+            const base_dir =
+              chat && typeof chat.base_dir === 'string' && chat.base_dir.trim()
+                ? chat.base_dir.trim()
+                : null;
+            const baseAbs = base_dir ? path.resolve(base_dir) : null;
+            const targetAbs = path.isAbsolute(reqPath)
+              ? path.resolve(reqPath)
+              : path.resolve(baseAbs || process.cwd(), reqPath);
+
+            if (baseAbs) {
+              const prefix = baseAbs.endsWith(path.sep) ? baseAbs : (baseAbs + path.sep);
+              if (!(targetAbs === baseAbs || targetAbs.startsWith(prefix))) {
+                json(res, 403, { error: 'path outside base_dir' });
+                return true;
+              }
+            }
+
+            let st;
+            try { st = fs.statSync(targetAbs); } catch { st = null; }
+            if (!st) {
+              json(res, 404, { error: 'file not found' });
+              return true;
+            }
+            if (!st.isFile()) {
+              json(res, 400, { error: 'not a file' });
+              return true;
+            }
+
+            const content = fs.readFileSync(targetAbs, 'utf8');
+            text(res, 200, content || '', 'text/plain');
+          } catch (e) {
+            json(res, 500, { error: e.message || String(e) });
+          }
+          return true;
+        }
+
+        // POST /api/chat/:id/file { path, content } -> save file (scoped to chat.base_dir when set)
+        if (req.method === 'POST' && fileMatch) {
+          const chatId = decodeURIComponent(fileMatch[1]);
+          try {
+            const body = await readJson(req);
+            const reqPath = body && typeof body.path === 'string' ? body.path : '';
+            const content = body && body.content !== undefined ? String(body.content) : '';
+            if (!String(reqPath || '').trim()) {
+              json(res, 400, { error: 'path is required' });
+              return true;
+            }
+
+            const chat = ChatSession.load(chatId);
+            if (!chat) {
+              json(res, 404, { error: 'not found' });
+              return true;
+            }
+
+            const base_dir =
+              chat && typeof chat.base_dir === 'string' && chat.base_dir.trim()
+                ? chat.base_dir.trim()
+                : null;
+            const baseAbs = base_dir ? path.resolve(base_dir) : null;
+            const targetAbs = path.isAbsolute(reqPath)
+              ? path.resolve(reqPath)
+              : path.resolve(baseAbs || process.cwd(), reqPath);
+
+            if (baseAbs) {
+              const prefix = baseAbs.endsWith(path.sep) ? baseAbs : (baseAbs + path.sep);
+              if (!(targetAbs === baseAbs || targetAbs.startsWith(prefix))) {
+                json(res, 403, { error: 'path outside base_dir' });
+                return true;
+              }
+            }
+
+            // Ensure parent directory exists.
+            try { fs.mkdirSync(path.dirname(targetAbs), { recursive: true }); } catch {}
+            fs.writeFileSync(targetAbs, content, 'utf8');
+            json(res, 200, { success: true });
           } catch (e) {
             json(res, 500, { error: e.message || String(e) });
           }
