@@ -2949,11 +2949,13 @@
           }).then(() => refreshChats()).catch((e) => alert(String(e && e.message ? e.message : e)));
         }));
         menu.appendChild(makeItem('Refresh', () => {
-          if (state.chatId === id) {
-            openChatId(id, { forceReload: true }).catch((e) => alert(String(e && e.message ? e.message : e)));
-          } else {
-            refreshChats().catch((e) => alert(String(e && e.message ? e.message : e)));
-          }
+          // Always refresh chat sessions list; if this chat is active, also force reload it.
+          refreshChats()
+            .then(() => {
+              if (state.chatId === id) return openChatId(id, { forceReload: true });
+              return null;
+            })
+            .catch((e) => alert(String(e && e.message ? e.message : e)));
         }));
         menu.appendChild(makeItem('Set directory', () => {
           openChatId(id)
