@@ -775,6 +775,7 @@ const toolHandlers = {
     const mode = args.output_mode || 'content';
     if (mode === 'files_with_matches') rgArgs.push('--files-with-matches');
     else if (mode === 'count') rgArgs.push('--count');
+    else rgArgs.push('--line-number'); // Ensure line numbers are included for content mode
 
     if (args['-i']) rgArgs.push('-i');
     if (typeof args['-B'] === 'number') rgArgs.push('-B', String(args['-B']));
@@ -811,20 +812,108 @@ const toolHandlers = {
       stdout = stdout.split('\n').slice(0, headLimit).join('\n');
     }
 
-    let output = `<workspace_result workspace_path="${baseRoot}">\n\n`;
+    let output = `<workspace_result workspace_path="${baseRoot}">\n`;
     if (result.exitCode !== 0 && !stdout.trim()) {
       output += 'No matches found.';
     } else if (stdout.trim()) {
-      const lines = stdout.trim().split('\n');
-      const matchLines = lines.filter(line => line.includes(':') && !line.startsWith('-'));
-      const matchCount = matchLines.length;
-      if (matchCount > 0) {
-        output += `Found ${matchCount} matching line${matchCount !== 1 ? 's' : ''}\n\n`;
+      // Handle different output modes
+      if (mode === 'files_with_matches' || mode === 'count') {
+        // For these modes, output format is different - just show the raw output
+        output += stdout.trim();
+      } else {
+        // Content mode: parse and format
+        const lines = stdout.trim().split('\n');
+        // Filter out context lines (lines starting with -) and separator lines
+        const matchLines = lines.filter(line => {
+          const trimmed = line.trim();
+          return trimmed && trimmed.includes(':') && !trimmed.startsWith('-') && !trimmed.startsWith('--');
+        });
+        const matchCount = matchLines.length;
+        if (matchCount > 0) {
+          output += `Found ${matchCount} matching line${matchCount !== 1 ? 's' : ''}\n`;
+        }
+        
+        // Parse and group matches by file
+        // Ripgrep format: file:line-number:content
+        // Use regex to match: file path, then :, then digits (line number), then :, then content
+        const fileMatches = new Map();
+        for (const line of matchLines) {
+          // Match pattern: (file path):(line number):(content)
+          // The line number is always digits, so we can use that as an anchor
+          // Use regex to find the pattern: anything:digits:anything
+          // This handles file paths that might contain colons (like Windows drive letters)
+          const match = line.match(/^(.+?):(\d+):(.*)$/);
+          if (!match) {
+            // Try alternative: maybe the file path has colons, so we need to be more flexible
+            // Find the last colon (separates content), then work backwards
+            const lastColonIdx = line.lastIndexOf(':');
+            if (lastColonIdx === -1) continue;
+            
+            const beforeLastColon = line.substring(0, lastColonIdx);
+            const content = line.substring(lastColonIdx + 1);
+            
+            // Find the colon before the line number by looking for :digits at the end
+            const secondLastColonIdx = beforeLastColon.lastIndexOf(':');
+            if (secondLastColonIdx === -1) continue;
+            
+            const filePath = beforeLastColon.substring(0, secondLastColonIdx);
+            const lineNum = beforeLastColon.substring(secondLastColonIdx + 1).trim();
+            
+            // Validate line number is numeric
+            if (!/^\d+$/.test(lineNum)) continue;
+            
+            // Convert to relative path with ./ prefix
+            let relPath;
+            if (path.isAbsolute(filePath)) {
+              relPath = './' + path.relative(baseRoot, filePath);
+            } else {
+              relPath = filePath.startsWith('./') ? filePath : './' + filePath;
+            }
+            
+            if (!fileMatches.has(relPath)) {
+              fileMatches.set(relPath, []);
+            }
+            fileMatches.get(relPath).push({ lineNum, content });
+            continue;
+          }
+          
+          const filePath = match[1];
+          const lineNum = match[2];
+          const content = match[3];
+          
+          // Convert to relative path with ./ prefix
+          let relPath;
+          if (path.isAbsolute(filePath)) {
+            relPath = './' + path.relative(baseRoot, filePath);
+          } else {
+            // If it's already relative, make sure it starts with ./
+            relPath = filePath.startsWith('./') ? filePath : './' + filePath;
+          }
+          
+          if (!fileMatches.has(relPath)) {
+            fileMatches.set(relPath, []);
+          }
+          fileMatches.get(relPath).push({ lineNum, content });
+        }
+        
+        // Format output grouped by file
+        if (fileMatches.size > 0) {
+          const fileEntries = Array.from(fileMatches.entries()).sort();
+          for (const [file, matches] of fileEntries) {
+            output += file + '\n';
+            for (const { lineNum, content } of matches) {
+              output += `${lineNum}:${content}\n`;
+            }
+          }
+        } else if (matchCount > 0) {
+          // Fallback: if parsing failed but we have matches, show original format
+          output += stdout.trim();
+        }
       }
-      output += stdout.trim();
     } else {
       output += result.stderr.trim() || 'No output';
     }
+    output += '\n</workspace_result>';
     return output;
   },
 

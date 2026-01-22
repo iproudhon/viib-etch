@@ -257,14 +257,28 @@ async function testTodoWrite() {
   }
   console.log('  ✓ Missing fields correctly rejected');
   
-  const resultTooFew = await executeTool('todo_write', {
+  // Test that a single todo is allowed (minimum is 1, not 2)
+  const resultSingle = await executeTool('todo_write', {
     merge: false,
     todos: [{ id: '1', status: 'pending', content: 'Only one' }]
   }, context1);
-  if (resultTooFew.success !== false || !resultTooFew.error || !resultTooFew.error.includes('at least 2 items')) {
-    throw new Error(`Expected error for less than 2 todos, got: ${JSON.stringify(resultTooFew)}`);
+  if (!resultSingle.success || resultSingle.todo_count !== 1) {
+    throw new Error(`Expected success with 1 todo, got: ${JSON.stringify(resultSingle)}`);
   }
-  console.log('  ✓ Less than 2 todos correctly rejected');
+  if (session.data.todos.length !== 1) {
+    throw new Error(`Expected 1 todo in session, got: ${session.data.todos.length}`);
+  }
+  console.log('  ✓ Single todo is allowed');
+  
+  // Test that empty todos array is rejected
+  const resultEmpty = await executeTool('todo_write', {
+    merge: false,
+    todos: []
+  }, context1);
+  if (resultEmpty.success !== false || !resultEmpty.error || !resultEmpty.error.includes('at least 1 item')) {
+    throw new Error(`Expected error for empty todos, got: ${JSON.stringify(resultEmpty)}`);
+  }
+  console.log('  ✓ Empty todos array correctly rejected');
   
   // Test 4: Missing session context
   const resultNoSession = await executeTool('todo_write', {
@@ -600,18 +614,85 @@ async function testRg() {
     if (!out1.includes('Found') || !out1.includes('foo')) {
       throw new Error(`Unexpected rg output:\n${out1}`);
     }
-    console.log('  ✓ Finds matches');
+    
+    // Verify closing tag is present
+    if (!out1.includes('</workspace_result>')) {
+      throw new Error(`Expected closing tag </workspace_result>, got:\n${out1}`);
+    }
+    
+    // Verify no ?: artifacts (should not have "?:" in output)
+    if (out1.includes('?:')) {
+      throw new Error(`Found ?: artifacts in output, got:\n${out1}`);
+    }
+    
+    // Verify new format: relative paths with ./ prefix
+    if (!out1.includes('./')) {
+      throw new Error(`Expected relative paths with ./ prefix, got:\n${out1}`);
+    }
+    
+    // Verify format: line numbers before content (lineNumber:content)
+    const matchLinePattern = /^\d+:/m;
+    if (!matchLinePattern.test(out1)) {
+      throw new Error(`Expected line number format (lineNumber:content), got:\n${out1}`);
+    }
+    
+    // Verify file grouping: file path on its own line, followed by matches
+    const lines = out1.split('\n');
+    let foundFileHeader = false;
+    let foundMatchAfterFile = false;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].startsWith('./') && !lines[i].includes(':')) {
+        foundFileHeader = true;
+        // Next non-empty line should be a match with line number
+        for (let j = i + 1; j < lines.length; j++) {
+          if (lines[j].trim() === '') continue;
+          if (matchLinePattern.test(lines[j])) {
+            foundMatchAfterFile = true;
+            break;
+          }
+          break;
+        }
+        break;
+      }
+    }
+    
+    if (!foundFileHeader) {
+      throw new Error(`Expected file path on its own line, got:\n${out1}`);
+    }
+    if (!foundMatchAfterFile) {
+      throw new Error(`Expected matches after file path, got:\n${out1}`);
+    }
+    
+    // Verify all matches are found (should find 2 matches of 'foo' in a.txt)
+    const matchLines = lines.filter(l => matchLinePattern.test(l));
+    if (matchLines.length < 2) {
+      throw new Error(`Expected at least 2 matches, got ${matchLines.length}:\n${out1}`);
+    }
+    
+    console.log('  ✓ Finds matches with correct format (relative paths, line numbers, grouped by file, closing tag, no artifacts)');
 
     const out2 = await executeTool('rg', { pattern: 'foo', path: tmpDir, head_limit: 1 }, {});
-    const lines = out2.split('\n').filter(l => l.includes(':') && l.includes('foo'));
-    if (lines.length > 1) {
-      throw new Error(`Expected head_limit to truncate matches, got:\n${out2}`);
+    // With new format, head_limit should limit the number of match lines
+    const matchLines2 = out2.split('\n').filter(l => /^\d+:/m.test(l));
+    if (matchLines2.length > 1) {
+      throw new Error(`Expected head_limit to truncate matches, got ${matchLines2.length} matches:\n${out2}`);
+    }
+    // Verify closing tag and no artifacts
+    if (!out2.includes('</workspace_result>')) {
+      throw new Error(`Expected closing tag </workspace_result>, got:\n${out2}`);
+    }
+    if (out2.includes('?:')) {
+      throw new Error(`Found ?: artifacts in output, got:\n${out2}`);
     }
     console.log('  ✓ head_limit truncates output');
 
     const out3 = await executeTool('rg', { pattern: 'does_not_match', path: tmpDir }, {});
     if (!out3.includes('No matches found')) {
       throw new Error(`Expected no matches message, got:\n${out3}`);
+    }
+    // Verify closing tag for no matches case
+    if (!out3.includes('</workspace_result>')) {
+      throw new Error(`Expected closing tag </workspace_result>, got:\n${out3}`);
     }
     console.log('  ✓ No matches case');
   } finally {
