@@ -16,9 +16,9 @@
   "author": "iproudhon",
   "license": "SEE LICENSE IN LICENSE",
   "dependencies": {
-    "openai": "^6.15.0",
-    "@google/genai": "^1.0.0",
-    "markdown-it": "^14.1.0"
+    "@google/genai": "^1.38.0",
+    "markdown-it": "^14.1.0",
+    "openai": "^6.15.0"
   },
   "repository": {
     "type": "git",

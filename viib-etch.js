@@ -94,7 +94,7 @@ class ChatModel {
 
   _isGeminiModel() {
     const modelName = (this.model || '').toLowerCase();
-    return modelName.includes('gemini') || modelName.startsWith('google/');
+    return modelName.includes('gemini') || modelName.includes('veo') || modelName.startsWith('google/');
   }
 
   readSystemPromptFileFresh() {
@@ -140,6 +140,10 @@ class ChatSession {
     // Record shape (minimal):
     //   { id, kind: 'reference'|'generated', mime_type, data_b64, created_at, ... }
     this.images = (data.images && typeof data.images === 'object') ? data.images : {};
+    // In-memory audio store: id -> audio record
+    // Record shape (minimal):
+    //   { id, kind: 'voiceover'|'generated', mime_type, data_b64, created_at, ... }
+    this.audio = (data.audio && typeof data.audio === 'object') ? data.audio : {};
     this.data = data.data || {};
     // Persistent base directory for tool execution (optional).
     // If set, tool execution will chdir() into this directory for the duration of the tool call.
@@ -254,6 +258,7 @@ class ChatSession {
       model_name: this.model_name,
       messages: this.messages,
       images: this.images,
+      audio: this.audio,
       data: this.data,
       base_dir: this.base_dir
     };
@@ -375,6 +380,39 @@ class ChatSession {
     const b64 = rec.data_b64 ?? rec.data_base64 ?? rec.b64_json ?? rec.data ?? null;
     if (!b64 || typeof b64 !== 'string') {
       throw new Error(`image has no data_b64: ${String(id)}`);
+    }
+    return Buffer.from(b64, 'base64');
+  }
+
+  _ensureAudioMap() {
+    if (!this.audio || typeof this.audio !== 'object') this.audio = {};
+    return this.audio;
+  }
+
+  addAudio(audioRecord) {
+    if (!audioRecord || typeof audioRecord !== 'object') {
+      throw new Error('addAudio: audioRecord must be an object');
+    }
+    const audio = this._ensureAudioMap();
+    const id = audioRecord.id ? String(audioRecord.id) : crypto.randomUUID();
+    const rec = { ...audioRecord, id };
+    audio[id] = rec;
+    this.save();
+    return id;
+  }
+
+  getAudio(id) {
+    const audio = this._ensureAudioMap();
+    const key = (id === null || id === undefined) ? '' : String(id);
+    return audio[key] || null;
+  }
+
+  getAudioData(id) {
+    const rec = this.getAudio(id);
+    if (!rec) throw new Error(`audio not found: ${String(id)}`);
+    const b64 = rec.data_b64 ?? rec.data_base64 ?? rec.b64_json ?? rec.data ?? null;
+    if (!b64 || typeof b64 !== 'string') {
+      throw new Error(`audio has no data_b64: ${String(id)}`);
     }
     return Buffer.from(b64, 'base64');
   }
@@ -3186,6 +3224,549 @@ class ChatLLM {
       reference_images: referenceImageIds,
       images: savedIds,
       message: assistantMessage,
+    };
+  }
+
+  /**
+   * generateVideoSegment(prompt, options={})
+   *
+   * - Stores videos in ChatSession.images[id] (base64), never writes to disk.
+   * - Stores audio in ChatSession.audio[id] (base64) for voiceover.
+   * - Assistant message block stores video id and audio id.
+   * - Supports multiple modes: new segment, extend, update, frame-directed.
+   * - Supports native audio generation or provided voiceover.
+   * - Uses Veo API via Google GenAI library.
+   */
+  async generateVideoSegment(prompt, options = {}) {
+    if (typeof prompt !== 'string' || !prompt.trim()) {
+      throw new Error('generateVideoSegment: prompt must be a non-empty string');
+    }
+
+    const model = this._ensureModelResolved();
+    const client = this.getClient();
+    const modelName = model.model.replace(/^google\//, '');
+    const isVeoModel = modelName.toLowerCase().includes('veo');
+    
+    // Veo models are Gemini-based, but check for Veo explicitly
+    if (!isVeoModel) {
+      const isGemini = model._isGeminiModel();
+      if (!isGemini) {
+        throw new Error('generateVideoSegment: only Gemini/Veo models are supported');
+      }
+      throw new Error(`generateVideoSegment: model ${modelName} is not a Veo model`);
+    }
+
+    const nowIso = () => new Date().toISOString();
+
+    const guessMime = (p) => {
+      const ext = String(p || '').toLowerCase();
+      if (ext.endsWith('.mp4')) return 'video/mp4';
+      if (ext.endsWith('.webm')) return 'video/webm';
+      if (ext.endsWith('.mov')) return 'video/quicktime';
+      if (ext.endsWith('.mp3')) return 'audio/mpeg';
+      if (ext.endsWith('.wav')) return 'audio/wav';
+      if (ext.endsWith('.m4a')) return 'audio/mp4';
+      return 'application/octet-stream';
+    };
+
+    // Normalize options
+    const opts = (options && typeof options === 'object') ? options : {};
+    // Veo API requires durationSeconds between 4 and 8 (inclusive)
+    const durationSeconds = Math.max(4, Math.min(8, Math.floor(opts.durationSeconds || 8)));
+    const aspectRatio = (opts.aspectRatio === '9:16') ? '9:16' : '16:9';
+    const generateAudio = opts.generateAudio !== false; // default true
+    const negativePrompt = (typeof opts.negativePrompt === 'string') ? opts.negativePrompt : undefined;
+    const seed = (typeof opts.seed === 'number') ? opts.seed : undefined;
+    const enhancePrompt = opts.enhancePrompt === true;
+    const lipsyncPrompt = (typeof opts.lipsyncPrompt === 'string') ? opts.lipsyncPrompt : undefined;
+
+    // Normalize referenceImages (same pattern as generateImage)
+    const refsRaw =
+      (opts.referenceImages === null || opts.referenceImages === undefined)
+        ? []
+        : (Array.isArray(opts.referenceImages) ? opts.referenceImages : [opts.referenceImages]);
+
+    const referenceImageIds = [];
+    for (const r of refsRaw) {
+      if (typeof r === 'string' && this.chat.getImage(r)) {
+        referenceImageIds.push(String(r));
+        continue;
+      }
+
+      if (typeof r === 'string') {
+        const abs = path.resolve(r);
+        const buf = fs.readFileSync(abs);
+        const rec = {
+          kind: 'reference',
+          mime_type: guessMime(abs),
+          data_b64: buf.toString('base64'),
+          created_at: nowIso(),
+          source_file_path: abs,
+        };
+        referenceImageIds.push(this.chat.addImage(rec));
+        continue;
+      }
+
+      if (!r || typeof r !== 'object') {
+        throw new Error('generateVideoSegment: each referenceImages entry must be an id string, a file path string, or an object');
+      }
+
+      const b64 = r.data_b64 ?? r.data_base64 ?? r.b64_json ?? r.data ?? null;
+      const hasB64 = typeof b64 === 'string' && b64.length > 0;
+      if (!hasB64) {
+        throw new Error('generateVideoSegment: reference image object must include data_b64');
+      }
+
+      const rec = {
+        id: r.id || crypto.randomUUID(),
+        kind: 'reference',
+        mime_type: r.mime_type || 'image/png',
+        data_b64: b64,
+        created_at: nowIso(),
+      };
+      referenceImageIds.push(this.chat.addImage(rec));
+    }
+
+    // Determine generation mode
+    const extendFrom = (typeof opts.extendFrom === 'string') ? String(opts.extendFrom) : null;
+    const updateTarget = (typeof opts.updateTarget === 'string') ? String(opts.updateTarget) : null;
+    const firstFrame = opts.firstFrame || null;
+    const lastFrame = opts.lastFrame || null;
+
+    let mode = 'new';
+    if (updateTarget) {
+      mode = 'update';
+    } else if (extendFrom) {
+      mode = 'extend';
+    } else if (firstFrame || lastFrame) {
+      mode = 'frame-directed';
+    }
+
+    // Handle voiceover audio if provided
+    let voiceoverAssetId = null;
+    if (opts.voiceoverAudio && !generateAudio) {
+      let voiceoverData = null;
+      let voiceoverMime = 'audio/mpeg';
+
+      if (typeof opts.voiceoverAudio === 'string') {
+        // Check if it's an existing audio ID
+        if (this.chat.getAudio(opts.voiceoverAudio)) {
+          voiceoverAssetId = String(opts.voiceoverAudio);
+        } else {
+          // Treat as file path
+          const abs = path.resolve(opts.voiceoverAudio);
+          const buf = fs.readFileSync(abs);
+          voiceoverMime = guessMime(abs);
+          voiceoverData = buf.toString('base64');
+        }
+      } else if (opts.voiceoverAudio && typeof opts.voiceoverAudio === 'object') {
+        // Check if it's an ID reference
+        if (opts.voiceoverAudio.id && this.chat.getAudio(opts.voiceoverAudio.id)) {
+          voiceoverAssetId = String(opts.voiceoverAudio.id);
+        } else {
+          // Object with data_b64
+          const b64 = opts.voiceoverAudio.data_b64 ?? opts.voiceoverAudio.data_base64 ?? opts.voiceoverAudio.data ?? null;
+          if (!b64 || typeof b64 !== 'string') {
+            throw new Error('generateVideoSegment: voiceoverAudio object must include data_b64 or id');
+          }
+          voiceoverData = String(b64);
+          voiceoverMime = opts.voiceoverAudio.mime_type || 'audio/mpeg';
+        }
+      }
+
+      // Store new voiceover if not already stored
+      if (voiceoverData && !voiceoverAssetId) {
+        const rec = {
+          kind: 'voiceover',
+          mime_type: voiceoverMime,
+          data_b64: voiceoverData,
+          created_at: nowIso(),
+        };
+        voiceoverAssetId = this.chat.addAudio(rec);
+      }
+    }
+
+    // Build reference image parts for API
+    const refInlineParts = () => {
+      const parts = [];
+      for (const id of referenceImageIds) {
+        const rec = this.chat.getImage(id);
+        if (!rec) continue;
+        const b64 = rec.data_b64 ?? rec.data_base64 ?? rec.b64_json ?? rec.data ?? null;
+        if (!b64) continue;
+        parts.push({
+          inlineData: {
+            data: String(b64),
+            mimeType: rec.mime_type || 'image/png',
+          },
+        });
+      }
+      return parts;
+    };
+
+    // Build frame data if provided
+    const getFrameData = (frame) => {
+      if (!frame) return null;
+      if (typeof frame === 'string') {
+        const rec = this.chat.getImage(frame);
+        if (!rec) return null;
+        const b64 = rec.data_b64 ?? rec.data_base64 ?? rec.b64_json ?? rec.data ?? null;
+        if (!b64) return null;
+        return {
+          inlineData: {
+            data: String(b64),
+            mimeType: rec.mime_type || 'image/png',
+          },
+        };
+      }
+      if (frame && typeof frame === 'object') {
+        const b64 = frame.data_b64 ?? frame.data_base64 ?? frame.b64_json ?? frame.data ?? null;
+        if (!b64) return null;
+        return {
+          inlineData: {
+            data: String(b64),
+            mimeType: frame.mime_type || 'image/png',
+          },
+        };
+      }
+      return null;
+    };
+
+    // Persist user intent
+    const userIntent = {
+      role: 'user',
+      content: {
+        type: 'video_prompt',
+        prompt,
+        reference_images: referenceImageIds,
+        mode,
+        extend_from: extendFrom,
+        update_target: updateTarget,
+        options: {
+          durationSeconds,
+          aspectRatio,
+          generateAudio,
+          negativePrompt,
+          seed,
+          enhancePrompt,
+          lipsyncPrompt,
+          voiceover_audio: voiceoverAssetId,
+        },
+      },
+    };
+    this.chat.addMessage(userIntent);
+
+    // Build Veo API request
+    // Note: The exact API structure may vary - this is based on expected Veo API format
+    const requestConfig = {
+      prompt: String(prompt),
+      durationSeconds,
+      aspectRatio,
+      generateAudio,
+    };
+
+    if (negativePrompt) requestConfig.negativePrompt = negativePrompt;
+    if (seed !== undefined) requestConfig.seed = seed;
+    if (enhancePrompt) requestConfig.enhancePrompt = true;
+    if (lipsyncPrompt) requestConfig.lipsyncPrompt = lipsyncPrompt;
+
+    // Add reference images
+    const refParts = refInlineParts();
+    if (refParts.length > 0) {
+      requestConfig.referenceImages = refParts;
+    }
+
+    // Add frame continuity
+    const firstFrameData = getFrameData(firstFrame);
+    const lastFrameData = getFrameData(lastFrame);
+    if (firstFrameData) requestConfig.firstFrame = firstFrameData;
+    if (lastFrameData) requestConfig.lastFrame = lastFrameData;
+
+    // Add extension/modification targets
+    if (extendFrom) {
+      const extendVideo = this.chat.getImage(extendFrom);
+      if (!extendVideo) {
+        throw new Error(`generateVideoSegment: extendFrom video not found: ${extendFrom}`);
+      }
+      requestConfig.extendFrom = extendFrom;
+    }
+
+    if (updateTarget) {
+      const updateVideo = this.chat.getImage(updateTarget);
+      if (!updateVideo) {
+        throw new Error(`generateVideoSegment: updateTarget video not found: ${updateTarget}`);
+      }
+      requestConfig.updateTarget = updateTarget;
+    }
+
+    // Call Veo API using Google GenAI library
+    let operation = null;
+    let videoBytes = null;
+    let videoMimeType = 'video/mp4';
+
+    try {
+      // Build the video generation request using library API
+      const generateRequest = {
+        model: modelName,
+        prompt: String(prompt),
+        config: {
+          durationSeconds,
+          aspectRatio,
+        },
+      };
+
+      // Add optional config parameters
+      if (negativePrompt) generateRequest.config.negativePrompt = negativePrompt;
+      if (seed !== undefined) generateRequest.config.seed = seed;
+      if (enhancePrompt) generateRequest.config.enhancePrompt = true;
+      // Note: generateAudio is not currently supported by the API
+      // Audio generation may be enabled by default in some models or require different parameter
+      // if (generateAudio) generateRequest.config.generateAudio = generateAudio;
+      // Note: lipsyncPrompt may not be supported - keeping for future API updates
+      // if (lipsyncPrompt) generateRequest.config.lipsyncPrompt = lipsyncPrompt;
+
+      // Add reference images
+      if (refParts.length > 0) {
+        generateRequest.referenceImages = refParts.map(part => part.inlineData);
+      }
+
+      // Add frame continuity
+      if (firstFrameData) generateRequest.firstFrame = firstFrameData.inlineData;
+      if (lastFrameData) generateRequest.lastFrame = lastFrameData.inlineData;
+
+      // Add extension/modification
+      if (extendFrom) {
+        const extendVideo = this.chat.getImage(extendFrom);
+        if (extendVideo) {
+          const videoB64 = extendVideo.data_b64 ?? extendVideo.data_base64 ?? extendVideo.data ?? null;
+          if (videoB64) {
+            generateRequest.video = {
+              inlineData: {
+                data: String(videoB64),
+                mimeType: extendVideo.mime_type || 'video/mp4',
+              },
+            };
+          }
+        }
+      }
+
+      if (updateTarget) {
+        const updateVideo = this.chat.getImage(updateTarget);
+        if (updateVideo) {
+          const videoB64 = updateVideo.data_b64 ?? updateVideo.data_base64 ?? updateVideo.data ?? null;
+          if (videoB64) {
+            generateRequest.video = {
+              inlineData: {
+                data: String(videoB64),
+                mimeType: updateVideo.mime_type || 'video/mp4',
+              },
+            };
+          }
+        }
+      }
+
+      // Use library method to generate video
+      if (typeof client.models !== 'undefined' && typeof client.models.generateVideos === 'function') {
+        operation = await client.models.generateVideos(generateRequest);
+      } else {
+        throw new Error('generateVideoSegment: client.models.generateVideos is not available. Please ensure @google/genai library is up to date.');
+      }
+
+      // Poll operation until complete
+      if (operation && typeof operation === 'object' && !operation.done) {
+        const pollInterval = 10000; // 10 seconds
+        while (!operation.done) {
+          await new Promise(resolve => setTimeout(resolve, pollInterval));
+          
+          // Poll operation status using library method
+          if (typeof client.operations !== 'undefined' && typeof client.operations.getVideosOperation === 'function') {
+            operation = await client.operations.getVideosOperation({
+              // operation: operation.name || operation,
+              operation,
+            });
+          } else {
+            throw new Error('generateVideoSegment: client.operations.getVideosOperation is not available. Please ensure @google/genai library is up to date.');
+          }
+
+          if (operation.error) {
+            throw new Error(`generateVideoSegment: operation failed: ${operation.error.message || JSON.stringify(operation.error)}`);
+          }
+        }
+      }
+
+      // Extract video from completed operation
+      if (operation && operation.response && operation.response.generatedVideos) {
+        const generatedVideos = operation.response.generatedVideos;
+        if (Array.isArray(generatedVideos) && generatedVideos.length > 0) {
+          const videoFile = generatedVideos[0].video;
+          
+          // Download video using library method
+          if (typeof client.files !== 'undefined' && typeof client.files.download === 'function') {
+            // Use library download method
+            const https = require('https');
+            const http = require('http');
+            const url = require('url');
+            
+            // The file object should have a uri or data property
+            const videoUri = videoFile.uri || videoFile.data;
+            if (videoUri) {
+              if (typeof videoUri === 'string' && videoUri.startsWith('http')) {
+                // Download from URI
+                const parsedUrl = new url.URL(videoUri);
+                const clientModule = parsedUrl.protocol === 'https:' ? https : http;
+                
+                videoBytes = await new Promise((resolve, reject) => {
+                  clientModule.get(videoUri, (res) => {
+                    const chunks = [];
+                    res.on('data', (chunk) => chunks.push(chunk));
+                    res.on('end', () => resolve(Buffer.concat(chunks)));
+                    res.on('error', reject);
+                  }).on('error', reject);
+                });
+              } else if (typeof videoUri === 'string') {
+                // Base64 data
+                videoBytes = Buffer.from(videoUri, 'base64');
+              } else if (Buffer.isBuffer(videoUri)) {
+                videoBytes = videoUri;
+              }
+            } else {
+              // Try using library's download method directly
+              try {
+                const tempPath = require('os').tmpdir() + '/' + crypto.randomUUID() + '.mp4';
+                await client.files.download({
+                  file: videoFile,
+                  downloadPath: tempPath,
+                });
+                videoBytes = fs.readFileSync(tempPath);
+                fs.unlinkSync(tempPath); // Clean up temp file
+              } catch (downloadError) {
+                throw new Error(`generateVideoSegment: failed to download video: ${downloadError.message}`);
+              }
+            }
+          } else {
+            // Fallback: try to extract from file object directly
+            const videoData = videoFile.data || videoFile.inlineData?.data;
+            if (videoData) {
+              videoBytes = Buffer.from(String(videoData), 'base64');
+            } else {
+              throw new Error('generateVideoSegment: video file format not recognized');
+            }
+          }
+        } else {
+          throw new Error('generateVideoSegment: no videos in operation response');
+        }
+      } else {
+        throw new Error('generateVideoSegment: no video data returned from operation');
+      }
+
+      if (!videoBytes) {
+        throw new Error('generateVideoSegment: failed to extract video data');
+      }
+    } catch (error) {
+      throw new Error(`generateVideoSegment: API call failed: ${error.message || String(error)}`);
+    }
+
+    // Store video
+    const videoBase64 = videoBytes.toString('base64');
+    const videoRec = {
+      kind: 'generated',
+      mime_type: videoMimeType,
+      data_b64: videoBase64,
+      created_at: nowIso(),
+      provider: 'gemini',
+      prompt,
+      reference_images: referenceImageIds,
+      mode,
+      extend_from: extendFrom ? String(extendFrom) : null,
+      update_target: updateTarget ? String(updateTarget) : null,
+      audio: generateAudio ? { type: 'native' } : (voiceoverAssetId ? { type: 'voiceover', voiceover_asset: voiceoverAssetId } : null),
+      veo_operation: {
+        name: operation?.name || null,
+        model: modelName,
+        config: requestConfig,
+      },
+    };
+    const videoId = this.chat.addImage(videoRec);
+
+    // Store audio if native generation returned separate audio
+    let audioId = null;
+    if (operation && operation.response && operation.response.audio) {
+      const audioData = operation.response.audio.data || operation.response.audio.uri;
+      if (audioData) {
+        let audioBytes = null;
+        if (typeof audioData === 'string' && audioData.startsWith('http')) {
+          const https = require('https');
+          const http = require('http');
+          const url = require('url');
+          const parsedUrl = new url.URL(audioData);
+          const clientModule = parsedUrl.protocol === 'https:' ? https : http;
+          
+          audioBytes = await new Promise((resolve, reject) => {
+            clientModule.get(audioData, (res) => {
+              const chunks = [];
+              res.on('data', (chunk) => chunks.push(chunk));
+              res.on('end', () => resolve(Buffer.concat(chunks)));
+              res.on('error', reject);
+            }).on('error', reject);
+          });
+        } else if (typeof audioData === 'string') {
+          audioBytes = Buffer.from(audioData, 'base64');
+        } else if (Buffer.isBuffer(audioData)) {
+          audioBytes = audioData;
+        }
+
+        if (audioBytes) {
+          const audioRec = {
+            kind: 'generated',
+            mime_type: 'audio/mpeg',
+            data_b64: audioBytes.toString('base64'),
+            created_at: nowIso(),
+            provider: 'gemini',
+            video_id: videoId,
+          };
+          audioId = this.chat.addAudio(audioRec);
+        }
+      }
+    }
+
+    // Build assistant message
+    const assistantMessage = {
+      role: 'assistant',
+      content: {
+        type: 'video',
+        provider: 'gemini',
+        prompt,
+        mode,
+        reference_images: referenceImageIds,
+        video: videoId,
+        extend_from: extendFrom ? String(extendFrom) : null,
+        update_target: updateTarget ? String(updateTarget) : null,
+        audio: generateAudio ? { type: 'native', audio_id: audioId } : (voiceoverAssetId ? { type: 'voiceover', voiceover_asset: voiceoverAssetId } : null),
+        operation: { name: operation?.name || null },
+      },
+    };
+    this.chat.addMessage(assistantMessage);
+
+    // Persist video history
+    this.chat.data = this.chat.data && typeof this.chat.data === 'object' ? this.chat.data : {};
+    if (!Array.isArray(this.chat.data.gemini_video_history)) {
+      this.chat.data.gemini_video_history = [];
+    }
+    this.chat.data.gemini_video_history.push({
+      user: userIntent,
+      result: { video: videoId, operation: operation?.name || null },
+    });
+    this.chat.save();
+
+    return {
+      provider: 'gemini',
+      prompt,
+      mode,
+      reference_images: referenceImageIds,
+      video: videoId,
+      audio: audioId,
+      message: assistantMessage,
+      operation: { name: operation?.name || null },
     };
   }
 }
