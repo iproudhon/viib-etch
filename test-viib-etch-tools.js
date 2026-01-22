@@ -578,6 +578,73 @@ async function testApplyPatch() {
       throw new Error(`Expected missing file error, got: ${JSON.stringify(res4)}`);
     }
     console.log('  ✓ Rejects update for missing file');
+
+    // Test 5: No-context hunk with blank lines + non-unique deleted lines
+    // Regression for patches shaped like:
+    // @@
+    // -        }
+    // -
+    // -        }
+    // -
+    // -        // sentinel
+    // +        }
+    // +
+    // +        // sentinel
+    // where the removed line ("}") is not unique and the patch relies on adjacency/blank lines.
+    const file5 = path.join(tmpDir, 'brace.txt');
+    const original5 = [
+      'function x() {',
+      '  doThing();',
+      '}',
+      '',
+      '        }',
+      '',
+      '        }',
+      '',
+      '        // SENTINEL',
+      'tail();',
+      ''
+    ].join('\n');
+    fs.writeFileSync(file5, original5, 'utf8');
+
+    const patch5 = [
+      '*** Begin Patch',
+      `*** Update File: ${file5}`,
+      '@@',
+      '-        }',
+      '-',
+      '-        }',
+      '-',
+      '-        // SENTINEL',
+      '+        }',
+      '+',
+      '+        // SENTINEL',
+      '*** End Patch',
+      ''
+    ].join('\n');
+
+    const res5 = await executeTool('apply_patch', { patchCommand: patch5 }, {});
+    if (!res5 || res5.success !== true) {
+      throw new Error(`apply_patch no-context regression failed: ${JSON.stringify(res5)}`);
+    }
+
+    const after5 = fs.readFileSync(file5, 'utf8');
+    const expected5 = [
+      'function x() {',
+      '  doThing();',
+      '}',
+      '',
+      '        }',
+      '',
+      '        // SENTINEL',
+      'tail();',
+      ''
+    ].join('\n');
+
+    if (after5 !== expected5) {
+      throw new Error(`Unexpected output for no-context regression.\n--- expected ---\n${expected5}\n--- actual ---\n${after5}`);
+    }
+    console.log('  ✓ No-context hunk removes the correct non-unique line and preserves blank lines');
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

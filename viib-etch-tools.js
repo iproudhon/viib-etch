@@ -1210,6 +1210,12 @@ const toolHandlers = {
           } else if (l.startsWith('+') || l.startsWith('-') || l.startsWith(' ')) {
             if (currentContext === null) currentContext = '';
             currentLines.push({ type: l[0], content: l.slice(1) });
+          } else if (l === '') {
+            // Preserve blank lines inside hunks.
+            // Without this, patches that delete/insert blocks separated by empty lines can mis-apply
+            // because the operation ordering and anchoring changes.
+            if (currentContext === null) currentContext = '';
+            currentLines.push({ type: ' ', content: '' });
           } else if (l.trim() !== '') {
             // Non-empty line not prefixed by + - space. Treat as a context hint.
             if (currentContext === null || currentContext === '') currentContext = l.trim();
@@ -1314,6 +1320,46 @@ const toolHandlers = {
           }
         }
 
+        // If there are no explicit context (' ') lines, try to apply the hunk by
+        // matching the entire "old" sequence (all '-' lines and blank context lines)
+        // and replacing it with the "new" sequence (all '+' lines and blank context lines).
+        // This is important for patches that only specify -/+ lines and rely on adjacency,
+        // especially when the removed lines are not unique (e.g., multiple "}" lines).
+        const hasExplicitContext = block.lines.some(op => op.type === ' ' && op.content !== '');
+        if ((!block.context || !block.context.trim()) && !hasExplicitContext) {
+          const oldSeq = block.lines
+            .filter(op => op.type === '-' || (op.type === ' ' && op.content === ''))
+            .map(op => op.type === '-' ? op.content : '');
+          const newSeq = block.lines
+            .filter(op => op.type === '+' || (op.type === ' ' && op.content === ''))
+            .map(op => op.type === '+' ? op.content : '');
+
+          if (oldSeq.length > 0) {
+            // Find contiguous match for oldSeq in fileLines.
+            let matchAt = -1;
+            for (let s = 0; s <= fileLines.length - oldSeq.length; s++) {
+              let ok = true;
+              for (let j = 0; j < oldSeq.length; j++) {
+                if (fileLines[s + j] !== oldSeq[j]) {
+                  ok = false;
+                  break;
+                }
+              }
+              if (ok) {
+                matchAt = s;
+                break;
+              }
+            }
+            if (matchAt === -1) {
+              throw new Error(`apply_patch: could not find hunk (no-context) sequence in file ${hunk.filename}`);
+            }
+            // Replace the matched range with newSeq
+            fileLines.splice(matchAt, oldSeq.length, ...newSeq);
+            pos = matchAt + newSeq.length;
+            continue;
+          }
+        }
+
         for (const op of block.lines) {
           if (op.type === ' ') {
             // Context lines: trim leading whitespace for flexible matching
@@ -1363,7 +1409,15 @@ const toolHandlers = {
             pos = found + 1;
           } else if (op.type === '-') {
             const toRemove = op.content;
-            // Remove the first matching line at/after pos
+            // Prefer removing at the current position (sequential application).
+            // This avoids deleting the wrong occurrence when the same line appears multiple times
+            // (e.g., multiple "}" lines) and the patch relies on nearby context/blank lines.
+            if (fileLines[pos] === toRemove) {
+              fileLines.splice(pos, 1);
+              // keep pos (now points at next line)
+              continue;
+            }
+            // Otherwise, search forward for the next exact match.
             const idx = fileLines.findIndex((l, k) => k >= pos && l === toRemove);
             if (idx === -1) {
               throw new Error(`apply_patch: could not find line to remove: "${toRemove}" in file ${hunk.filename}`);
