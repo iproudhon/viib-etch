@@ -1933,6 +1933,24 @@
 
         // Final result -> reuse existing renderer by synthesizing toolMsg
         if (tb.result !== null && tb.result !== undefined) {
+          // Normalize live result into the same "content" shape that replay expects.
+          // Many tools (e.g. rg, list_dir, glob_file_search, read_file wrappers) return
+          // an object like { result: "<text>" }. For those, prefer the inner string
+          // so the UI shows raw tool output instead of a JSON wrapper.
+          let contentForToolMsg;
+          if (typeof tb.result === 'string') {
+            contentForToolMsg = tb.result;
+          } else if (
+            tb.result &&
+            typeof tb.result === 'object' &&
+            typeof tb.result.result === 'string'
+          ) {
+            contentForToolMsg = tb.result.result;
+          } else {
+            // Fallback: preserve previous behavior for non-textual results.
+            contentForToolMsg = JSON.stringify(tb.result);
+          }
+
           const fakeTc = {
             id: tb.toolCallId,
             function: {
@@ -1944,7 +1962,7 @@
             role: 'tool',
             tool_call_id: tb.toolCallId,
             name: tb.name,
-            content: typeof tb.result === 'string' ? tb.result : JSON.stringify(tb.result),
+            content: contentForToolMsg,
           };
           const { title, bodyHtml } = await renderTool((pane && pane.chat) ? pane.chat : (state.chat || { data: {} }), fakeTc, fakeToolMsg);
           if (tb.detailsEl && title) {
