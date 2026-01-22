@@ -71,6 +71,8 @@
           backdropEl: null,
           windowEl: null,
           headerEl: null,
+          titleEl: null,
+          topRowEl: null,
           bodyEl: null,
           sidebarEl: null,
           editorEl: null, // fallback textarea
@@ -91,6 +93,14 @@
           // Edit mode is fullscreen: hides list + dir bar.
           editMode: false,
           showDiff: false,
+          // Window mode: 'explorer' (default) or 'changes'
+          mode: 'explorer',
+          // Changes tab: 'current' | 'original' | 'diff'
+          changesTab: 'current',
+          changesTabsEl: null,
+          btnTabCurrentEl: null,
+          btnTabOriginalEl: null,
+          btnTabDiffEl: null,
           pathInputEl: null,
           statusEl: null,
           isMinimized: false,
@@ -2282,8 +2292,30 @@
         const editorToolbarSpacer = document.createElement('div');
         editorToolbarSpacer.style.flex = '1 1 auto';
 
+        const changesTabs = document.createElement('div');
+        changesTabs.style.display = 'none';
+        changesTabs.style.gap = '6px';
+        changesTabs.style.alignItems = 'center';
+
+        const mkTabBtn = (label) => {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 've-iconbtn';
+          b.textContent = label;
+          b.style.minWidth = '72px';
+          b.style.padding = '6px 10px';
+          return b;
+        };
+        const btnTabCurrent = mkTabBtn('Current');
+        const btnTabOriginal = mkTabBtn('Original');
+        const btnTabDiff = mkTabBtn('Diff');
+        changesTabs.appendChild(btnTabCurrent);
+        changesTabs.appendChild(btnTabOriginal);
+        changesTabs.appendChild(btnTabDiff);
+
         editorToolbar.appendChild(btnEdit);
         editorToolbar.appendChild(btnSave);
+        editorToolbar.appendChild(changesTabs);
         editorToolbar.appendChild(editorToolbarSpacer);
 
         const editorHost = document.createElement('div');
@@ -2322,9 +2354,10 @@
         const applyEditorLayoutState = () => {
           // View-only mode: show file list + dir bar (right-side panel editor).
           // Edit mode: editor occupies whole window (keep header).
+          const isChanges = fe.mode === 'changes';
           const isEdit = !!fe.editMode;
-          try { sidebar.style.display = isEdit ? 'none' : 'flex'; } catch {}
-          try { topRow.style.display = isEdit ? 'none' : 'flex'; } catch {}
+          try { sidebar.style.display = (isEdit && !isChanges) ? 'none' : 'flex'; } catch {}
+          try { topRow.style.display = (isChanges || isEdit) ? 'none' : 'flex'; } catch {}
           try {
             editorHost.style.margin = isEdit ? '0' : '8px 8px 10px 8px';
             diffHost.style.margin = isEdit ? '0' : '8px 8px 10px 8px';
@@ -2334,10 +2367,13 @@
         };
 
         const applyEditorMode = () => {
+          const isChanges = fe.mode === 'changes';
           // Update buttons
           btnEdit.textContent = fe.viewOnly ? 'Edit' : 'View';
-          btnSave.style.display = fe.editMode ? 'inline-flex' : 'none';
+          btnEdit.style.display = isChanges ? 'none' : 'inline-flex';
+          btnSave.style.display = (!isChanges && fe.editMode) ? 'inline-flex' : 'none';
           btnSave.disabled = !fe.editMode || !fe.currentPath;
+          changesTabs.style.display = isChanges ? 'flex' : 'none';
 
           // Textarea fallback
           try { editor.readOnly = !!fe.viewOnly; } catch {}
@@ -2352,14 +2388,25 @@
           }
 
           editor.style.display = 'none';
-          editorHost.style.display = 'block';
-          diffHost.style.display = 'none';
+          if (isChanges && fe.changesTab === 'diff') {
+            editorHost.style.display = 'none';
+            diffHost.style.display = 'block';
+          } else {
+            editorHost.style.display = 'block';
+            diffHost.style.display = 'none';
+          }
           applyEditorLayoutState();
           try {
             fe.monacoEditor.updateOptions({
               readOnly: !!fe.viewOnly,
-              lineNumbers: fe.viewOnly ? 'off' : 'on',
+              // Changes mode: always show line numbers (read-only viewer).
+              lineNumbers: isChanges ? 'on' : (fe.viewOnly ? 'off' : 'on'),
             });
+          } catch {}
+          try {
+            if (fe.monacoDiffEditor) {
+              fe.monacoDiffEditor.updateOptions({ renderSideBySide: false });
+            }
           } catch {}
           layoutFileExplorerEditors();
         };
@@ -2580,6 +2627,8 @@
           fe.backdropEl = null;
           fe.windowEl = null;
           fe.headerEl = null;
+          fe.titleEl = null;
+          fe.topRowEl = null;
           fe.bodyEl = null;
           fe.sidebarEl = null;
           fe.editorEl = null;
@@ -2589,6 +2638,12 @@
           fe.btnEditEl = null;
           fe.btnDiffEl = null;
           fe.btnSaveEl = null;
+          fe.mode = 'explorer';
+          fe.changesTab = 'current';
+          fe.changesTabsEl = null;
+          fe.btnTabCurrentEl = null;
+          fe.btnTabOriginalEl = null;
+          fe.btnTabDiffEl = null;
           fe.monacoEditor = null;
           fe.monacoDiffEditor = null;
           fe.originalModel = null;
@@ -2606,6 +2661,8 @@
         fe.backdropEl = backdrop;
         fe.windowEl = win;
         fe.headerEl = header;
+        fe.titleEl = title;
+        fe.topRowEl = topRow;
         fe.bodyEl = list;
         fe.sidebarEl = sidebar;
         fe.editorEl = editor;
@@ -2615,6 +2672,10 @@
         fe.btnEditEl = btnEdit;
         fe.btnDiffEl = null;
         fe.btnSaveEl = btnSave;
+        fe.changesTabsEl = changesTabs;
+        fe.btnTabCurrentEl = btnTabCurrent;
+        fe.btnTabOriginalEl = btnTabOriginal;
+        fe.btnTabDiffEl = btnTabDiff;
         fe.pathInputEl = pathInput;
         fe.statusEl = status;
 
@@ -2631,6 +2692,205 @@
       const updateFileExplorerStatus = (text) => {
         const fe = ensureFileExplorerWindow();
         if (fe.statusEl) fe.statusEl.textContent = text || '';
+      };
+
+      const setFileWindowMode = (mode) => {
+        const fe = ensureFileExplorerWindow();
+        fe.mode = mode === 'changes' ? 'changes' : 'explorer';
+        fe.editMode = false;
+        fe.viewOnly = true;
+        fe.changesTab = 'current';
+        try {
+          if (fe.titleEl) fe.titleEl.textContent = fe.mode === 'changes' ? 'Changes' : 'File Explorer';
+        } catch {}
+        try {
+          if (fe.topRowEl) fe.topRowEl.style.display = fe.mode === 'changes' ? 'none' : 'flex';
+        } catch {}
+        try {
+          if (typeof fe._applyEditorMode === 'function') fe._applyEditorMode();
+        } catch {}
+      };
+
+      const renderChangesList = (files, baseDir) => {
+        const fe = ensureFileExplorerWindow();
+        const list = fe.bodyEl;
+        if (!list) return;
+        list.innerHTML = '';
+
+        const ul = document.createElement('div');
+        ul.style.display = 'flex';
+        ul.style.flexDirection = 'column';
+        ul.style.padding = '0';
+        ul.style.margin = '0';
+
+        const makeRow = (label, onClick) => {
+          const row = document.createElement('button');
+          row.type = 'button';
+          row.style.display = 'flex';
+          row.style.alignItems = 'center';
+          row.style.justifyContent = 'space-between';
+          row.style.padding = '4px 10px';
+          row.style.border = 'none';
+          row.style.background = 'transparent';
+          row.style.textAlign = 'left';
+          row.style.cursor = 'pointer';
+          row.style.font = 'inherit';
+          row.style.borderRadius = '0';
+          row.addEventListener('mouseover', () => { row.style.background = '#f3f4f6'; });
+          row.addEventListener('mouseout', () => { row.style.background = 'transparent'; });
+          row.addEventListener('click', () => { if (onClick) onClick(); });
+
+          const text = document.createElement('span');
+          text.textContent = label;
+          text.style.whiteSpace = 'nowrap';
+          text.style.overflow = 'hidden';
+          text.style.textOverflow = 'ellipsis';
+          row.appendChild(text);
+          ul.appendChild(row);
+        };
+
+        const arr = Array.isArray(files) ? files : [];
+        for (const p of arr) {
+          const rel = String(p || '').trim();
+          if (!rel) continue;
+          makeRow(rel, () => openChangeFile(rel, baseDir));
+        }
+
+        list.appendChild(ul);
+      };
+
+      const openChangesWindowForChat = async (chatId) => {
+        const id = String(chatId || '');
+        if (!id) return;
+        setFileWindowMode('changes');
+        const fe = ensureFileExplorerWindow();
+        try {
+          const res = await apiFetch(`/chat/${encodeURIComponent(id)}/changes`, { method: 'GET' });
+          const base_dir = res && typeof res.base_dir === 'string' ? res.base_dir : '';
+          const files = res && Array.isArray(res.files) ? res.files : [];
+          renderChangesList(files, base_dir || '');
+        } catch (e) {
+          updateFileExplorerStatus(String(e && e.message ? e.message : e));
+        }
+      };
+
+      const setChangesTabActive = (tab) => {
+        const fe = ensureFileExplorerWindow();
+        fe.changesTab = tab === 'original' ? 'original' : (tab === 'diff' ? 'diff' : 'current');
+        const setBtn = (btn, active) => {
+          if (!btn) return;
+          btn.style.background = active ? '#e5e7eb' : '';
+          btn.style.borderColor = active ? 'rgba(17,24,39,0.24)' : '';
+        };
+        setBtn(fe.btnTabCurrentEl, fe.changesTab === 'current');
+        setBtn(fe.btnTabOriginalEl, fe.changesTab === 'original');
+        setBtn(fe.btnTabDiffEl, fe.changesTab === 'diff');
+        // Switch Monaco editor model based on active tab (changes mode only).
+        if (fe.mode === 'changes' && fe.monacoEditor && fe.originalModel && fe.modifiedModel) {
+          try {
+            if (fe.changesTab === 'original') {
+              fe.monacoEditor.setModel(fe.originalModel);
+            } else {
+              fe.monacoEditor.setModel(fe.modifiedModel);
+            }
+          } catch {}
+        }
+        try { if (typeof fe._applyEditorMode === 'function') fe._applyEditorMode(); } catch {}
+      };
+
+      const openChangeFile = async (relPath, baseDir) => {
+        const pane = getActivePane();
+        if (!pane || !pane.chatId) return;
+        const fe = ensureFileExplorerWindow();
+        fe.mode = 'changes';
+        fe.viewOnly = true;
+        fe.editMode = false;
+        fe.currentPath = String(relPath || '');
+
+        // Ensure tab buttons are wired once.
+        if (fe.btnTabCurrentEl && !fe.btnTabCurrentEl.getAttribute('data-wired')) {
+          fe.btnTabCurrentEl.setAttribute('data-wired', '1');
+          fe.btnTabOriginalEl.setAttribute('data-wired', '1');
+          fe.btnTabDiffEl.setAttribute('data-wired', '1');
+          fe.btnTabCurrentEl.addEventListener('click', () => setChangesTabActive('current'));
+          fe.btnTabOriginalEl.addEventListener('click', () => setChangesTabActive('original'));
+          fe.btnTabDiffEl.addEventListener('click', () => setChangesTabActive('diff'));
+        }
+        setChangesTabActive(fe.changesTab || 'current');
+
+        // Load both current and original.
+        try {
+          const [cur, orig] = await Promise.all([
+            apiFetch(`/chat/${encodeURIComponent(pane.chatId)}/file?path=${encodeURIComponent(String(relPath || ''))}`, { method: 'GET' }),
+            apiFetch(`/chat/${encodeURIComponent(pane.chatId)}/original?path=${encodeURIComponent(String(relPath || ''))}`, { method: 'GET' }),
+          ]);
+          const currentText = typeof cur === 'string' ? cur : (cur && cur.content) || '';
+          const originalText = typeof orig === 'string' ? orig : (orig && orig.content) || '';
+
+          fe.originalText = String(originalText || '');
+
+          // Ensure Monaco loaded (fallback textarea if not).
+          try {
+            const monaco = fe.monaco || (await loadMonaco());
+            fe.monaco = monaco;
+
+            if (!fe.monacoEditor) {
+              fe.monacoEditor = monaco.editor.create(fe.editorHostEl, {
+                value: '',
+                language: 'plaintext',
+                theme: 'vs',
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                automaticLayout: false,
+                readOnly: true,
+                lineNumbers: 'on',
+                wordWrap: 'on',
+                fontSize: isMobile() ? 12 : 13,
+                fontFamily:
+                  'ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace',
+              });
+            }
+            if (!fe.monacoDiffEditor) {
+              fe.monacoDiffEditor = monaco.editor.createDiffEditor(fe.diffHostEl, {
+                theme: 'vs',
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                automaticLayout: false,
+                readOnly: true,
+                renderSideBySide: false,
+              });
+            }
+
+            // Dispose prior models.
+            try { if (fe.originalModel) fe.originalModel.dispose(); } catch {}
+            try { if (fe.modifiedModel) fe.modifiedModel.dispose(); } catch {}
+            fe.originalModel = null;
+            fe.modifiedModel = null;
+
+            const lang = inferMonacoLanguage(relPath);
+            const uriBase = `inmemory://changes/${Date.now()}_${Math.random().toString(16).slice(2)}/${encodeURIComponent(relPath)}`;
+            fe.originalModel = monaco.editor.createModel(String(originalText || ''), lang, monaco.Uri.parse(uriBase + '?o=1'));
+            fe.modifiedModel = monaco.editor.createModel(String(currentText || ''), lang, monaco.Uri.parse(uriBase + '?c=1'));
+
+            // Wire models depending on active tab.
+            try {
+              if (fe.changesTab === 'original') fe.monacoEditor.setModel(fe.originalModel);
+              else fe.monacoEditor.setModel(fe.modifiedModel);
+            } catch {}
+            try { fe.monacoDiffEditor.setModel({ original: fe.originalModel, modified: fe.modifiedModel }); } catch {}
+            try { fe.monacoDiffEditor.updateOptions({ renderSideBySide: false }); } catch {}
+
+            if (typeof fe._applyEditorMode === 'function') fe._applyEditorMode();
+            layoutFileExplorerEditors();
+            updateFileExplorerStatus(fileBaseName(relPath));
+          } catch {
+            // Monaco unavailable -> fallback textarea (current only).
+            if (fe.editorEl) fe.editorEl.value = String(currentText || '');
+            updateFileExplorerStatus(fileBaseName(relPath));
+          }
+        } catch (e) {
+          updateFileExplorerStatus(String(e && e.message ? e.message : e));
+        }
       };
 
       const renderFileList = (entries, currentDir) => {
@@ -2936,6 +3196,9 @@
           const base = pane && pane.chat && pane.chat.base_dir ? String(pane.chat.base_dir) : '';
           if (fe.pathInputEl && base) fe.pathInputEl.value = base;
           openFileExplorerAtDir(base || '.');
+        }));
+        menu.appendChild(makeItem('Changes…', () => {
+          openChangesWindowForChat(id);
         }));
         menu.appendChild(makeItem('Rename', () => {
           const currentTitle = chatSummary.title || 'New Chat';
@@ -3963,6 +4226,140 @@
               return true;
             }
             json(res, 200, result);
+          } catch (e) {
+            json(res, 500, { error: e.message || String(e) });
+          }
+          return true;
+        }
+
+        // GET /api/chat/:id/changes -> list of changed files (relative to base_dir when set)
+        const changesMatch = pathname.match(
+          new RegExp('^' + apiBase.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '/chat/([^/]+)/changes$')
+        );
+        if (req.method === 'GET' && changesMatch) {
+          const chatId = decodeURIComponent(changesMatch[1]);
+          try {
+            const chat = ChatSession.load(chatId);
+            if (!chat) {
+              json(res, 404, { error: 'not found' });
+              return true;
+            }
+            const base_dir =
+              chat && typeof chat.base_dir === 'string' && chat.base_dir.trim()
+                ? chat.base_dir.trim()
+                : null;
+            const baseAbs = base_dir ? path.resolve(base_dir) : null;
+            const cwdAbs = path.resolve(process.cwd());
+            const fo = chat && chat.data && chat.data.fileOriginals && typeof chat.data.fileOriginals === 'object'
+              ? chat.data.fileOriginals
+              : {};
+            const keys = Object.keys(fo || {});
+            const files = [];
+            for (const k of keys) {
+              const relCwd = String(k || '').trim();
+              if (!relCwd) continue;
+              // fileOriginals keys are relative to process.cwd() at tool execution time.
+              // If base_dir is set, try resolving relative to base_dir first (tools run there).
+              let abs;
+              if (path.isAbsolute(relCwd)) {
+                abs = path.resolve(relCwd);
+              } else if (baseAbs) {
+                // Try base_dir first (most common case when tools run in base_dir).
+                const tryBase = path.resolve(baseAbs, relCwd);
+                const prefix = baseAbs.endsWith(path.sep) ? baseAbs : (baseAbs + path.sep);
+                if (tryBase === baseAbs || tryBase.startsWith(prefix)) {
+                  abs = tryBase;
+                } else {
+                  // Fall back to cwd resolution.
+                  abs = path.resolve(cwdAbs, relCwd);
+                }
+              } else {
+                abs = path.resolve(cwdAbs, relCwd);
+              }
+              // If base_dir is set, only include files within it; otherwise include all.
+              if (baseAbs) {
+                const prefix = baseAbs.endsWith(path.sep) ? baseAbs : (baseAbs + path.sep);
+                if (!(abs === baseAbs || abs.startsWith(prefix))) continue;
+                // Compute relative path from base_dir for display.
+                const relToBase = path.relative(baseAbs, abs);
+                const disp = relToBase.replace(/\\/g, '/');
+                if (disp && !disp.startsWith('..') && disp !== '.') files.push(disp);
+              } else {
+                // No base_dir: use the key as-is (relative to cwd), normalize separators.
+                const disp = relCwd.replace(/\\/g, '/');
+                if (disp) files.push(disp);
+              }
+            }
+            files.sort((a, b) => a.localeCompare(b));
+            json(res, 200, { base_dir: base_dir || '', files });
+          } catch (e) {
+            json(res, 500, { error: e.message || String(e) });
+          }
+          return true;
+        }
+
+        // GET /api/chat/:id/original?path=... -> original content from chat.data.fileOriginals
+        const originalMatch = pathname.match(
+          new RegExp('^' + apiBase.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '/chat/([^/]+)/original$')
+        );
+        if (req.method === 'GET' && originalMatch) {
+          const chatId = decodeURIComponent(originalMatch[1]);
+          const reqPath = query && typeof query.path === 'string' ? String(query.path) : '';
+          if (!reqPath.trim()) {
+            json(res, 400, { error: 'path is required' });
+            return true;
+          }
+          try {
+            const chat = ChatSession.load(chatId);
+            if (!chat) {
+              json(res, 404, { error: 'not found' });
+              return true;
+            }
+            const base_dir =
+              chat && typeof chat.base_dir === 'string' && chat.base_dir.trim()
+                ? chat.base_dir.trim()
+                : null;
+            const baseAbs = base_dir ? path.resolve(base_dir) : null;
+            const cwdAbs = path.resolve(process.cwd());
+            const targetAbs = path.isAbsolute(reqPath)
+              ? path.resolve(reqPath)
+              : path.resolve(baseAbs || cwdAbs, reqPath);
+            if (baseAbs) {
+              const prefix = baseAbs.endsWith(path.sep) ? baseAbs : (baseAbs + path.sep);
+              if (!(targetAbs === baseAbs || targetAbs.startsWith(prefix))) {
+                json(res, 403, { error: 'path outside base_dir' });
+                return true;
+              }
+            }
+            const fo = chat && chat.data && chat.data.fileOriginals && typeof chat.data.fileOriginals === 'object'
+              ? chat.data.fileOriginals
+              : {};
+            // fileOriginals keys are relative to process.cwd() at tool execution time.
+            // If base_dir is set, tools likely ran there, so try that first.
+            let lookupKey = null;
+            if (baseAbs) {
+              const relToBase = path.relative(baseAbs, targetAbs);
+              if (relToBase && !relToBase.startsWith('..') && relToBase !== '.') {
+                // Try key relative to base_dir (normalized separators).
+                const keyBase = relToBase.replace(/\\/g, '/');
+                if (keyBase in fo) {
+                  lookupKey = keyBase;
+                }
+              }
+            }
+            if (!lookupKey) {
+              // Fall back to key relative to process.cwd().
+              const relCwd = path.relative(cwdAbs, targetAbs);
+              const keyCwd = relCwd.replace(/\\/g, '/');
+              if (keyCwd in fo) {
+                lookupKey = keyCwd;
+              }
+            }
+            if (!lookupKey || !(lookupKey in fo)) {
+              json(res, 404, { error: 'original not found' });
+              return true;
+            }
+            text(res, 200, String(fo[lookupKey] ?? ''), 'text/plain');
           } catch (e) {
             json(res, 500, { error: e.message || String(e) });
           }
