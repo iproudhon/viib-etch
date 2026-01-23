@@ -333,10 +333,23 @@ class ChatSession {
       const c = msg.content;
       if (!c || typeof c !== 'object') continue;
 
-      // Current UI format: { type:'image'|'image_prompt', reference_images:[...], images:[...] }
+      // Current UI format: { type:'image'|'image_prompt'|'video'|'video_prompt', reference_images:[...], images:[...] }
       addIds(c.images);
       addIds(c.reference_images);
       addIds(c.reference_image_ids);
+
+      // Veo/video: assistant message stores generated video id at content.video
+      // (videos are stored in ChatSession.images as well).
+      if (c.type === 'video' && c.video) {
+        addId(c.video);
+      }
+
+      // Video prompt may reference images (already handled) and may refer to existing videos.
+      // Keep those assets as well.
+      if (c.type === 'video_prompt') {
+        if (c.extend_from) addId(c.extend_from);
+        if (c.update_target) addId(c.update_target);
+      }
     }
 
     const removedIds = [];
@@ -3344,33 +3357,38 @@ class ChatLLM {
 
     // Handle voiceover audio if provided
     let voiceoverAssetId = null;
-    if (opts.voiceoverAudio && !generateAudio) {
+    // UI sends voiceover_audio (snake) to mirror persisted chat JSON.
+    const voiceoverOpt = (opts.voiceoverAudio !== undefined && opts.voiceoverAudio !== null)
+      ? opts.voiceoverAudio
+      : (opts.voiceover_audio !== undefined && opts.voiceover_audio !== null ? opts.voiceover_audio : null);
+
+    if (voiceoverOpt && !generateAudio) {
       let voiceoverData = null;
       let voiceoverMime = 'audio/mpeg';
 
-      if (typeof opts.voiceoverAudio === 'string') {
+      if (typeof voiceoverOpt === 'string') {
         // Check if it's an existing audio ID
-        if (this.chat.getAudio(opts.voiceoverAudio)) {
-          voiceoverAssetId = String(opts.voiceoverAudio);
+        if (this.chat.getAudio(voiceoverOpt)) {
+          voiceoverAssetId = String(voiceoverOpt);
         } else {
           // Treat as file path
-          const abs = path.resolve(opts.voiceoverAudio);
+          const abs = path.resolve(voiceoverOpt);
           const buf = fs.readFileSync(abs);
           voiceoverMime = guessMime(abs);
           voiceoverData = buf.toString('base64');
         }
-      } else if (opts.voiceoverAudio && typeof opts.voiceoverAudio === 'object') {
+      } else if (voiceoverOpt && typeof voiceoverOpt === 'object') {
         // Check if it's an ID reference
-        if (opts.voiceoverAudio.id && this.chat.getAudio(opts.voiceoverAudio.id)) {
-          voiceoverAssetId = String(opts.voiceoverAudio.id);
+        if (voiceoverOpt.id && this.chat.getAudio(voiceoverOpt.id)) {
+          voiceoverAssetId = String(voiceoverOpt.id);
         } else {
           // Object with data_b64
-          const b64 = opts.voiceoverAudio.data_b64 ?? opts.voiceoverAudio.data_base64 ?? opts.voiceoverAudio.data ?? null;
+          const b64 = voiceoverOpt.data_b64 ?? voiceoverOpt.data_base64 ?? voiceoverOpt.data ?? null;
           if (!b64 || typeof b64 !== 'string') {
             throw new Error('generateVideoSegment: voiceoverAudio object must include data_b64 or id');
           }
           voiceoverData = String(b64);
-          voiceoverMime = opts.voiceoverAudio.mime_type || 'audio/mpeg';
+          voiceoverMime = voiceoverOpt.mime_type || 'audio/mpeg';
         }
       }
 
@@ -3504,6 +3522,11 @@ class ChatLLM {
     let videoBytes = null;
     let videoMimeType = 'video/mp4';
 
+    // Video generation is not a typical streamed text response, but we still
+    // want hooks to fire consistently for logging/UI.
+    const requestStartAt = Date.now();
+    try { await this.callHook('onRequestStart'); } catch {}
+
     try {
       // Build the video generation request using library API
       const generateRequest = {
@@ -3600,57 +3623,59 @@ class ChatLLM {
         if (Array.isArray(generatedVideos) && generatedVideos.length > 0) {
           const videoFile = generatedVideos[0].video;
           
-          // Download video using library method
+          // Download video bytes.
+          // Prefer the GenAI client download helper (it handles auth/redirects).
+          const safeUnlink = (p) => { try { fs.unlinkSync(p); } catch {} };
+          const looksLikeMp4 = (buf) => {
+            if (!buf || !Buffer.isBuffer(buf) || buf.length < 12) return false;
+            // ISO BMFF/MP4: 'ftyp' at offset 4
+            return buf.slice(4, 8).toString('ascii') === 'ftyp';
+          };
+          const decodeMaybeBase64 = (s) => {
+            try {
+              if (typeof s !== 'string' || !s) return null;
+              // Heuristic: JSON starts with '{'/'['; mp4 base64 usually won't.
+              const trimmed = s.trim();
+              if (trimmed.startsWith('{') || trimmed.startsWith('[')) return null;
+              const buf = Buffer.from(trimmed, 'base64');
+              return buf && buf.length ? buf : null;
+            } catch {
+              return null;
+            }
+          };
+
           if (typeof client.files !== 'undefined' && typeof client.files.download === 'function') {
-            // Use library download method
-            const https = require('https');
-            const http = require('http');
-            const url = require('url');
-            
-            // The file object should have a uri or data property
-            const videoUri = videoFile.uri || videoFile.data;
-            if (videoUri) {
-              if (typeof videoUri === 'string' && videoUri.startsWith('http')) {
-                // Download from URI
-                const parsedUrl = new url.URL(videoUri);
-                const clientModule = parsedUrl.protocol === 'https:' ? https : http;
-                
-                videoBytes = await new Promise((resolve, reject) => {
-                  clientModule.get(videoUri, (res) => {
-                    const chunks = [];
-                    res.on('data', (chunk) => chunks.push(chunk));
-                    res.on('end', () => resolve(Buffer.concat(chunks)));
-                    res.on('error', reject);
-                  }).on('error', reject);
-                });
-              } else if (typeof videoUri === 'string') {
-                // Base64 data
-                videoBytes = Buffer.from(videoUri, 'base64');
-              } else if (Buffer.isBuffer(videoUri)) {
-                videoBytes = videoUri;
-              }
-            } else {
-              // Try using library's download method directly
-              try {
-                const tempPath = require('os').tmpdir() + '/' + crypto.randomUUID() + '.mp4';
-                await client.files.download({
-                  file: videoFile,
-                  downloadPath: tempPath,
-                });
-                videoBytes = fs.readFileSync(tempPath);
-                fs.unlinkSync(tempPath); // Clean up temp file
-              } catch (downloadError) {
-                throw new Error(`generateVideoSegment: failed to download video: ${downloadError.message}`);
-              }
+            // Use the library download method directly.
+            const tmp = require('os').tmpdir() + '/' + crypto.randomUUID() + '.mp4';
+            try {
+              await client.files.download({ file: videoFile, downloadPath: tmp });
+              videoBytes = fs.readFileSync(tmp);
+            } finally {
+              safeUnlink(tmp);
             }
-          } else {
-            // Fallback: try to extract from file object directly
-            const videoData = videoFile.data || videoFile.inlineData?.data;
-            if (videoData) {
-              videoBytes = Buffer.from(String(videoData), 'base64');
-            } else {
-              throw new Error('generateVideoSegment: video file format not recognized');
+          }
+
+          // Fallbacks if download() isn't available or yielded nothing.
+          if (!videoBytes || !videoBytes.length) {
+            const videoUri = videoFile && (videoFile.uri || videoFile.data);
+            if (typeof videoUri === 'string' && videoUri && !videoUri.startsWith('http')) {
+              const b = decodeMaybeBase64(videoUri);
+              if (b) videoBytes = b;
             }
+          }
+          if (!videoBytes || !videoBytes.length) {
+            const videoData = videoFile && (videoFile.data || videoFile.inlineData?.data);
+            if (typeof videoData === 'string') {
+              const b = decodeMaybeBase64(videoData);
+              if (b) videoBytes = b;
+            }
+          }
+
+          // Validate we didn't accidentally save an error/redirect HTML/JSON body.
+          if (!looksLikeMp4(videoBytes)) {
+            let snippet = '';
+            try { snippet = videoBytes ? videoBytes.toString('utf8', 0, 200) : ''; } catch {}
+            throw new Error(`generateVideoSegment: downloaded content is not an MP4 (first bytes: ${JSON.stringify(snippet)})`);
           }
         } else {
           throw new Error('generateVideoSegment: no videos in operation response');
@@ -3664,6 +3689,8 @@ class ChatLLM {
       }
     } catch (error) {
       throw new Error(`generateVideoSegment: API call failed: ${error.message || String(error)}`);
+    } finally {
+      try { await this.callHook('onRequestDone', Date.now() - requestStartAt); } catch {}
     }
 
     // Store video
@@ -3745,7 +3772,11 @@ class ChatLLM {
         operation: { name: operation?.name || null },
       },
     };
+
+    const responseStartAt = Date.now();
+    try { await this.callHook('onResponseStart', 0); } catch {}
     this.chat.addMessage(assistantMessage);
+    try { await this.callHook('onResponseDone', assistantMessage.content, Date.now() - responseStartAt); } catch {}
 
     // Persist video history
     this.chat.data = this.chat.data && typeof this.chat.data === 'object' ? this.chat.data : {};

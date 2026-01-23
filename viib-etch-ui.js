@@ -602,7 +602,7 @@
           .ve-footer-row.ve-footer-actions{flex:0 0 auto;justify-content:space-between;}
           .ve-footer-controls{display:flex;gap:10px;align-items:center;flex:1 1 0;min-width:0;}
           .ve-footer-controls label{white-space:nowrap;font-size:12px;opacity:0.75;flex-shrink:0;}
-          .ve-footer-controls .ve-select{flex:0 1 auto;min-width:0;font-size:13px;max-width:200px;}
+          .ve-footer-controls .ve-select{flex:0 1 auto;min-width:0;font:13px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";padding:9px 10px;max-width:200px;}
           .ve-attach-thumbs{display:flex;flex-wrap:wrap;gap:8px;margin-top:-2px;}
           .ve-attach-thumb{position:relative;display:inline-flex;}
           .ve-attach-thumb img{display:block;border-radius:10px;border:1px solid rgba(17,24,39,0.12);background:#fff;object-fit:contain;cursor:pointer;}
@@ -771,6 +771,19 @@
           btnImgClear: null,
           imgAttachBadge: null,
           imgAttachThumbs: null,
+
+          // video options controls (veo/video-gen only):
+          videoOptsRow: null,
+          vidExtendFromInput: null,
+          vidUpdateTargetInput: null,
+          vidDurationInput: null,
+          vidAspectInput: null,
+          vidResolutionInput: null,
+          vidAudioGenChk: null,
+          vidVoicePasteBtn: null,
+          vidVoiceClearBtn: null,
+          vidVoiceBadge: null,
+          vidVoiceId: null,
           // per-pane scroll/jump state:
           autoScrollArmed: true,
           jumpBtn: null,
@@ -835,11 +848,15 @@
         modelLabel.textContent = 'Model';
         const modelSel = document.createElement('select');
         modelSel.className = 've-select';
+        modelSel.style.fontSize = '13px';
+        modelSel.style.lineHeight = '1.4';
 
         const reasoningLabel = document.createElement('label');
         reasoningLabel.textContent = 'Reasoning';
         const reasoningSel = document.createElement('select');
         reasoningSel.className = 've-select';
+        reasoningSel.style.fontSize = '13px';
+        reasoningSel.style.lineHeight = '1.4';
 
         const btnFolder = document.createElement('button');
         btnFolder.className = 've-iconbtn ve-folder';
@@ -897,8 +914,130 @@
         imgAttachThumbs.className = 've-attach-thumbs';
         imgAttachThumbs.style.display = 'none';
 
+        // Video options row (hidden by default; shown for Veo/video models)
+        const videoOptsRow = document.createElement('div');
+        videoOptsRow.className = 've-footer-row';
+        videoOptsRow.style.display = 'none';
+        videoOptsRow.style.alignItems = 'center';
+        videoOptsRow.style.gap = '10px';
+        videoOptsRow.style.flexWrap = 'wrap';
+
+        const mkLabel = (txt) => {
+          const l = document.createElement('label');
+          l.textContent = txt;
+          l.style.whiteSpace = 'nowrap';
+          l.style.fontSize = '12px';
+          l.style.opacity = '0.75';
+          return l;
+        };
+
+        const mkInput = (ph) => {
+          const i = document.createElement('input');
+          i.className = 've-input';
+          i.placeholder = ph;
+          // Match existing compact footer controls (model/reasoning): keep these small.
+          i.style.minWidth = '88px';
+          i.style.maxWidth = '140px';
+          // Match the bottom-row selects' apparent sizing.
+          // Note: `.ve-footer-controls .ve-select` uses 13px; without this these inputs
+          // will look like the textarea size even though they are `.ve-input`.
+          i.style.font = '13px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji"';
+          i.style.padding = '9px 10px';
+          return i;
+        };
+
+        const extendFromLabel = mkLabel('Extend From');
+        const extendFromInput = mkInput('video id');
+        const updateTargetLabel = mkLabel('Update Target');
+        const updateTargetInput = mkInput('video id');
+
+        const durationLabel = mkLabel('Duration');
+        const durationInput = mkInput('4');
+        durationInput.title = 'Duration seconds (4–8)';
+        durationInput.setAttribute('aria-label', 'Duration seconds');
+        durationInput.value = '4';
+        durationInput.inputMode = 'numeric';
+        // Narrow, character-based width
+        durationInput.style.width = '6ch';
+        durationInput.style.minWidth = '0';
+        durationInput.style.maxWidth = '6ch';
+
+        const aspectLabel = mkLabel('Aspect');
+        const aspectInput = mkInput('16:9');
+        const resolutionLabel = mkLabel('Resolution');
+        const resolutionInput = mkInput('720p');
+        resolutionInput.title = 'Resolution (e.g. 720p, 1024p, 4k)';
+        resolutionInput.setAttribute('aria-label', 'Resolution');
+        resolutionInput.value = '720p';
+        // Narrow, character-based width
+        resolutionInput.style.width = '6ch';
+        resolutionInput.style.minWidth = '0';
+        resolutionInput.style.maxWidth = '6ch';
+
+        aspectInput.title = 'Aspect ratio (16:9 or 9:16)';
+        aspectInput.setAttribute('aria-label', 'Aspect ratio');
+        aspectInput.value = '16:9';
+        // Narrow, character-based width
+        aspectInput.style.width = '6ch';
+        aspectInput.style.minWidth = '0';
+        aspectInput.style.maxWidth = '6ch';
+
+        const audioLabel = mkLabel('Audio');
+        const audioWrap = document.createElement('div');
+        audioWrap.style.cssText = 'display:flex;gap:8px;align-items:center;';
+
+        const audioGenChk = document.createElement('input');
+        audioGenChk.type = 'checkbox';
+        audioGenChk.checked = true;
+        audioGenChk.title = 'Generate audio';
+        audioGenChk.setAttribute('aria-label', 'Generate audio');
+
+        const audioGenTxt = document.createElement('span');
+        audioGenTxt.className = 've-muted';
+        audioGenTxt.style.cssText = 'font-size:12px;white-space:nowrap;';
+        audioGenTxt.textContent = 'Generate';
+
+        const voicePasteBtn = document.createElement('button');
+        voicePasteBtn.type = 'button';
+        voicePasteBtn.className = 've-iconbtn';
+        voicePasteBtn.textContent = '📋';
+        voicePasteBtn.title = 'Paste voiceover audio from clipboard (audio file)';
+        voicePasteBtn.setAttribute('aria-label', 'Paste voiceover audio');
+
+        const voiceBadge = document.createElement('span');
+        voiceBadge.className = 've-muted';
+        voiceBadge.style.cssText = 'font-size:12px;white-space:nowrap;';
+        voiceBadge.textContent = '';
+
+        const voiceClearBtn = document.createElement('button');
+        voiceClearBtn.type = 'button';
+        voiceClearBtn.className = 've-iconbtn';
+        voiceClearBtn.textContent = '✕';
+        voiceClearBtn.title = 'Clear voiceover audio';
+        voiceClearBtn.setAttribute('aria-label', 'Clear voiceover audio');
+
+        audioWrap.appendChild(audioGenChk);
+        audioWrap.appendChild(audioGenTxt);
+        audioWrap.appendChild(voicePasteBtn);
+        audioWrap.appendChild(voiceBadge);
+        audioWrap.appendChild(voiceClearBtn);
+
+        videoOptsRow.appendChild(extendFromLabel);
+        videoOptsRow.appendChild(extendFromInput);
+        videoOptsRow.appendChild(updateTargetLabel);
+        videoOptsRow.appendChild(updateTargetInput);
+        videoOptsRow.appendChild(durationLabel);
+        videoOptsRow.appendChild(durationInput);
+        videoOptsRow.appendChild(aspectLabel);
+        videoOptsRow.appendChild(aspectInput);
+        videoOptsRow.appendChild(resolutionLabel);
+        videoOptsRow.appendChild(resolutionInput);
+        videoOptsRow.appendChild(audioLabel);
+        videoOptsRow.appendChild(audioWrap);
+
         footerEl.appendChild(row1);
         footerEl.appendChild(imgAttachThumbs);
+        footerEl.appendChild(videoOptsRow);
         footerEl.appendChild(row2);
 
         pane.ta = ta;
@@ -912,6 +1051,18 @@
         pane.imgAttachBadge = imgAttachBadge;
         pane.imgAttachThumbs = imgAttachThumbs;
 
+        pane.videoOptsRow = videoOptsRow;
+        pane.vidExtendFromInput = extendFromInput;
+        pane.vidUpdateTargetInput = updateTargetInput;
+        pane.vidDurationInput = durationInput;
+        pane.vidAspectInput = aspectInput;
+        pane.vidResolutionInput = resolutionInput;
+        pane.vidAudioGenChk = audioGenChk;
+        pane.vidVoicePasteBtn = voicePasteBtn;
+        pane.vidVoiceClearBtn = voiceClearBtn;
+        pane.vidVoiceBadge = voiceBadge;
+        pane.vidVoiceId = null;
+
         // Wire per-pane controls (handlers reference functions defined later; safe because they're invoked on user interaction).
         modelSel.addEventListener('change', () => setSelectedModel(modelSel.value));
         reasoningSel.addEventListener('change', () => setSelectedReasoningEffort(reasoningSel.value));
@@ -919,6 +1070,9 @@
         btnImgClip.addEventListener('click', () => attachImageFromClipboard(pane));
         btnImgUrl.addEventListener('click', () => attachImageFromUrlPrompt(pane));
         btnImgClear.addEventListener('click', () => clearAttachedImages(pane));
+
+        voicePasteBtn.addEventListener('click', () => attachVoiceoverFromClipboard(pane));
+        voiceClearBtn.addEventListener('click', () => clearVoiceover(pane));
         btnAction.addEventListener('click', () => {
           if (pane.running) cancelRun(pane);
           else sendMessage(pane);
@@ -938,6 +1092,7 @@
 
         // Initial visibility
         try { updateImageAttachControls(pane); } catch {}
+        try { updateVideoOptionsControls(pane); } catch {}
         return pane;
       };
 
@@ -1075,10 +1230,20 @@
         return (state.models || []).find((m) => m && m.name === n) || { name: n, model: n };
       };
 
-      const isImageGenModel = (model_name) => {
+      const modelSearchString = (model_name) => {
         const rec = resolveModelRec(model_name);
-        const s = `${rec && rec.name ? rec.name : ''} ${rec && rec.model ? rec.model : ''}`.toLowerCase();
+        return `${rec && rec.name ? rec.name : ''} ${rec && rec.model ? rec.model : ''}`.toLowerCase();
+      };
+
+      const isImageGenModel = (model_name) => {
+        const s = modelSearchString(model_name);
         return s.includes('image') || s.includes('gpt-image') || s.includes('dall-e') || s.includes('imagen');
+      };
+
+      const isVideoGenModel = (model_name) => {
+        const s = modelSearchString(model_name);
+        // Simple heuristic: any Veo model or anything with "video" in the name.
+        return s.includes('veo') || s.includes('video');
       };
 
       const updateImageAttachControls = (pane) => {
@@ -1154,21 +1319,88 @@
         }
       };
 
+      const updateVideoOptionsControls = (pane) => {
+        if (!pane) return;
+        const isVideo = isVideoGenModel(getSelectedModel());
+        const setDisp = (el, v) => { try { if (el) el.style.display = v ? '' : 'none'; } catch {} };
+        setDisp(pane.videoOptsRow, !!isVideo);
+        if (!isVideo) return;
+
+        // Default Extend From / Update Target to the most recent assistant video id.
+        // Only auto-fill when the user hasn't typed anything.
+        try {
+          const chat = pane.chat;
+          const msgs = chat && Array.isArray(chat.messages) ? chat.messages : [];
+          let latestVid = '';
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            const m = msgs[i];
+            if (m && m.role === 'assistant' && m.content && typeof m.content === 'object' && m.content.type === 'video' && m.content.video) {
+              latestVid = String(m.content.video);
+              break;
+            }
+          }
+          if (latestVid) {
+            if (pane.vidExtendFromInput && !String(pane.vidExtendFromInput.value || '').trim()) {
+              pane.vidExtendFromInput.value = latestVid;
+            }
+            if (pane.vidUpdateTargetInput && !String(pane.vidUpdateTargetInput.value || '').trim()) {
+              pane.vidUpdateTargetInput.value = latestVid;
+            }
+          }
+        } catch {}
+
+        // Keep voiceover badge + clear button coherent
+        const hasVoice = !!(pane.vidVoiceId && String(pane.vidVoiceId).trim());
+        if (pane.vidVoiceBadge) {
+          pane.vidVoiceBadge.textContent = hasVoice ? `voice: ${String(pane.vidVoiceId).slice(0, 8)}…` : '';
+          setDisp(pane.vidVoiceBadge, hasVoice);
+        }
+        setDisp(pane.vidVoiceClearBtn, hasVoice);
+
+        // When generate audio is checked, voiceover is typically unused.
+        // We still keep it (user may toggle), but dim the badge.
+        try {
+          if (pane.vidVoiceBadge) {
+            pane.vidVoiceBadge.style.opacity = pane.vidAudioGenChk && pane.vidAudioGenChk.checked ? '0.45' : '0.75';
+          }
+        } catch {}
+      };
+
       const updateActionButton = (pane) => {
         if (!pane) return;
         const btn = pane.btnAction;
         if (!btn) return;
+
+        // Always reset to plain text; we only use emojis now.
+        btn.innerHTML = '';
+
         if (pane.running) {
           btn.textContent = '■';
           btn.title = 'Stop';
           btn.setAttribute('aria-label', 'Stop');
           return;
         }
-        const isImg = isImageGenModel(getSelectedModel());
-        btn.textContent = isImg ? '🐵' : '▲';
-        btn.title = isImg ? 'Generate image' : 'Send';
-        btn.setAttribute('aria-label', isImg ? 'Generate image' : 'Send');
+
+        const modelName = getSelectedModel();
+        const isImg = isImageGenModel(modelName);
+        const isVideo = isVideoGenModel(modelName);
+
+        if (isVideo) {
+          btn.textContent = '🐵';
+          btn.title = 'Generate video';
+          btn.setAttribute('aria-label', 'Generate video');
+        } else if (isImg) {
+          btn.textContent = '🍌';
+          btn.title = 'Generate image';
+          btn.setAttribute('aria-label', 'Generate image');
+        } else {
+          btn.textContent = '▲';
+          btn.title = 'Send';
+          btn.setAttribute('aria-label', 'Send');
+        }
+
         updateImageAttachControls(pane);
+        updateVideoOptionsControls(pane);
       };
 
       const groupToolOutputsForReplay = (chat) => {
@@ -1522,6 +1754,38 @@
               bubble.innerHTML = `<pre>${escapeHtml(p || '(image prompt)')}</pre>`;
               renderImageThumbs(bubble, chat.id, msg.content.reference_images);
               wrap.appendChild(bubble);
+            } else if (msg.content && typeof msg.content === 'object' && msg.content.type === 'video_prompt') {
+              const bubble = document.createElement('div');
+              bubble.className = 've-bubble';
+
+              const p = msg.content.prompt ? String(msg.content.prompt) : '';
+              const mode = msg.content.mode ? String(msg.content.mode) : 'new';
+              const extendFrom = msg.content.extend_from ? String(msg.content.extend_from) : '';
+              const updateTarget = msg.content.update_target ? String(msg.content.update_target) : '';
+              const opts = (msg.content.options && typeof msg.content.options === 'object') ? msg.content.options : {};
+
+              const duration = (opts.durationSeconds !== undefined && opts.durationSeconds !== null) ? String(opts.durationSeconds) : '';
+              const aspect = (opts.aspectRatio !== undefined && opts.aspectRatio !== null) ? String(opts.aspectRatio) : '';
+              const genAudio = (opts.generateAudio !== undefined && opts.generateAudio !== null) ? !!opts.generateAudio : false;
+              const enhance = (opts.enhancePrompt !== undefined && opts.enhancePrompt !== null) ? !!opts.enhancePrompt : false;
+              const voiceId = opts.voiceover_audio ? String(opts.voiceover_audio) : '';
+
+              const kv = [];
+              kv.push(`<span><span class="ve-muted">mode</span> ${escapeHtml(mode)}</span>`);
+              if (duration) kv.push(`<span><span class="ve-muted">duration</span> ${escapeHtml(duration)}s</span>`);
+              if (aspect) kv.push(`<span><span class="ve-muted">aspect</span> ${escapeHtml(aspect)}</span>`);
+              kv.push(`<span><span class="ve-muted">audio</span> ${genAudio ? 'generate' : 'off'}</span>`);
+              if (!genAudio && voiceId) kv.push(`<span><span class="ve-muted">voice</span> ${escapeHtml(String(voiceId).slice(0, 8))}…</span>`);
+              if (enhance) kv.push(`<span><span class="ve-muted">enhance</span> on</span>`);
+              if (extendFrom) kv.push(`<span><span class="ve-muted">extend_from</span> ${escapeHtml(String(extendFrom).slice(0, 8))}…</span>`);
+              if (updateTarget) kv.push(`<span><span class="ve-muted">update_target</span> ${escapeHtml(String(updateTarget).slice(0, 8))}…</span>`);
+
+              bubble.innerHTML = `
+                <pre>${escapeHtml(p || '(video prompt)')}</pre>
+                <div class="ve-kv" style="margin-top:8px;">${kv.join(' ')}</div>
+              `;
+              renderImageThumbs(bubble, chat.id, msg.content.reference_images);
+              wrap.appendChild(bubble);
             } else {
               wrap.innerHTML = `<div class="ve-bubble"><pre>${escapeHtml(msg.content || '')}</pre></div>`;
             }
@@ -1546,6 +1810,7 @@
             wrap.className = 've-msg ve-assistant';
 
             const isImageBlock = msg.content && typeof msg.content === 'object' && msg.content.type === 'image';
+            const isVideoBlock = msg.content && typeof msg.content === 'object' && msg.content.type === 'video';
 
             // Combined assistant block (response + reasoning in one) 
             const rk = paneScopedKey(pane, responseKey(i));
@@ -1572,7 +1837,9 @@
             preview.className = 've-assistant-preview';
             preview.textContent = isImageBlock
               ? firstLine((msg.content && msg.content.prompt) || '(image)') || '(image)'
-              : (firstLine(msg.content || msg.reasoning || '(no content)') || '(no content)');
+              : isVideoBlock
+                ? firstLine((msg.content && msg.content.prompt) || '(video)') || '(video)'
+                : (firstLine(msg.content || msg.reasoning || '(no content)') || '(no content)');
             main.appendChild(preview);
 
             const full = document.createElement('div');
@@ -1585,7 +1852,45 @@
             // Response content
             if (msg.content) {
               const respDiv = document.createElement('div');
-              if (isImageBlock) {
+              if (isVideoBlock) {
+                respDiv.className = 've-video';
+
+                const p = msg.content.prompt ? String(msg.content.prompt) : '';
+                const vid = msg.content.video ? String(msg.content.video) : '';
+                const opName = msg.content.operation && msg.content.operation.name ? String(msg.content.operation.name) : '';
+
+                const title = document.createElement('div');
+                title.style.cssText = 'margin:0 0 8px 0;';
+                title.innerHTML = `<pre style="margin:0;">${escapeHtml(p || '(video)')}</pre>`;
+                respDiv.appendChild(title);
+
+                if (vid) {
+                  const src = imageDataUrl(chat.id, vid);
+                  const v = document.createElement('video');
+                  v.controls = true;
+                  v.preload = 'metadata';
+                  v.src = src;
+                  v.style.cssText = [
+                    'display:block',
+                    'width:100%',
+                    'max-width:720px',
+                    'border-radius:12px',
+                    'border:1px solid rgba(17,24,39,0.12)',
+                    'background:#111827',
+                  ].join(';');
+                  respDiv.appendChild(v);
+
+                  const small = document.createElement('div');
+                  small.className = 've-muted';
+                  small.style.cssText = 'font-size:12px;margin-top:6px;';
+                  small.textContent = opName
+                    ? `video: ${vid}  |  operation: ${opName}`
+                    : `video: ${vid}`;
+                  respDiv.appendChild(small);
+                } else {
+                  respDiv.innerHTML += `<div class="ve-muted" style="font-size:12px;">(missing video id)</div>`;
+                }
+              } else if (isImageBlock) {
                 respDiv.className = 've-image';
                 const p = msg.content.prompt ? String(msg.content.prompt) : '';
                 respDiv.innerHTML = `<pre style="margin:0 0 8px 0;">${escapeHtml(p || '(image)')}</pre>`;
@@ -3622,13 +3927,58 @@
         if (!String(text || '').trim()) return;
         const model_name = getSelectedModel();
         const reasoning_effort = getSelectedReasoningEffort();
+
         const imgMode = isImageGenModel(model_name);
-        const params = imgMode ? { prompt: text, model_name } : { message: text, model_name };
+        const videoMode = isVideoGenModel(model_name);
+
+        let endpoint = 'send';
+        const params = { model_name };
+
         if (imgMode) {
+          endpoint = 'generate_image';
+          params.prompt = text;
           const ids = Array.isArray(pane.imageAttachIds) ? pane.imageAttachIds.map(String).filter(Boolean) : [];
           if (ids.length > 0) params.reference_image_ids = ids;
+        } else if (videoMode) {
+          endpoint = 'generate_video';
+          params.prompt = text;
+          // Video options (Veo)
+          const extend_from = pane.vidExtendFromInput ? String(pane.vidExtendFromInput.value || '').trim() : '';
+          const update_target = pane.vidUpdateTargetInput ? String(pane.vidUpdateTargetInput.value || '').trim() : '';
+          const durationSecondsRaw = pane.vidDurationInput ? String(pane.vidDurationInput.value || '').trim() : '';
+          const aspectRaw = pane.vidAspectInput ? String(pane.vidAspectInput.value || '').trim() : '';
+          const resolutionRaw = pane.vidResolutionInput ? String(pane.vidResolutionInput.value || '').trim() : '';
+
+          const durationSecondsParsed = (() => {
+            const n = Number(durationSecondsRaw);
+            if (!Number.isFinite(n)) return 4;
+            // Veo expects 4..8
+            return Math.max(4, Math.min(8, Math.floor(n)));
+          })();
+
+          const aspectRatio = (aspectRaw === '9:16') ? '9:16' : '16:9';
+          const generateAudio = pane.vidAudioGenChk ? !!pane.vidAudioGenChk.checked : true;
+
+          params.options = {
+            durationSeconds: durationSecondsParsed,
+            aspectRatio,
+            resolution: resolutionRaw || null,
+            generateAudio,
+            enhancePrompt: false,
+            voiceover_audio: (!generateAudio && pane.vidVoiceId) ? String(pane.vidVoiceId) : null,
+          };
+
+          // For compatibility with the existing backend implementation:
+          // pass extend/update as options keys that `generateVideoSegment()` already reads.
+          if (extend_from) params.options.extendFrom = extend_from;
+          if (update_target) params.options.updateTarget = update_target;
+        } else {
+          endpoint = 'send';
+          params.message = text;
+          if (reasoning_effort && reasoning_effort !== 'default') {
+            params.reasoning_effort = reasoning_effort;
+          }
         }
-        if (!imgMode && reasoning_effort && reasoning_effort !== 'default') params.reasoning_effort = reasoning_effort;
         setRunning(pane, true);
         ensureSSE(pane);
         pane.ta.value = '';
@@ -3637,7 +3987,6 @@
         pane.live.pendingUserEcho = String(text);
         liveAppendUserMessage(pane, String(text));
         try {
-          const endpoint = imgMode ? 'generate_image' : 'send';
           await apiFetch(`/chat/${encodeURIComponent(pane.chatId)}/${endpoint}`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
@@ -3692,6 +4041,57 @@
         const image_id = resp && (resp.id || resp.image_id) ? String(resp.id || resp.image_id) : '';
         if (!image_id) throw new Error('image upload failed');
         return image_id;
+      };
+
+      const uploadAudioDataToChat = async (chatId, mime_type, data_b64) => {
+        const id = String(chatId || '');
+        if (!id) throw new Error('no chat selected');
+        const mt = typeof mime_type === 'string' && mime_type ? mime_type : 'application/octet-stream';
+        const b64 = typeof data_b64 === 'string' && data_b64 ? data_b64 : '';
+        if (!b64) throw new Error('missing audio data');
+        const resp = await apiFetch(`/chat/${encodeURIComponent(id)}/audio`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ mime_type: mt, data_b64: b64 }),
+        });
+        const audio_id = resp && (resp.id || resp.audio_id) ? String(resp.id || resp.audio_id) : '';
+        if (!audio_id) throw new Error('audio upload failed');
+        return audio_id;
+      };
+
+      const attachVoiceoverFromClipboard = async (pane) => {
+        if (!pane || !pane.chatId) return;
+        try {
+          if (!navigator.clipboard || typeof navigator.clipboard.read !== 'function') {
+            throw new Error('Clipboard read not supported (needs HTTPS + permissions)');
+          }
+          const items = await navigator.clipboard.read();
+          let blob = null;
+          let mt = '';
+          for (const it of items) {
+            const types = Array.isArray(it.types) ? it.types : [];
+            const best = types.find((t) => String(t || '').startsWith('audio/')) || '';
+            if (!best) continue;
+            blob = await it.getType(best);
+            mt = best;
+            break;
+          }
+          if (!blob) throw new Error('No audio found on clipboard');
+          const dataUrl = await fileReaderToDataUrl(blob);
+          const parsed = parseDataUrlToB64(dataUrl);
+          if (!parsed || !parsed.data_b64) throw new Error('Failed to parse clipboard audio');
+          const audioId = await uploadAudioDataToChat(pane.chatId, parsed.mime_type || mt || blob.type, parsed.data_b64);
+          pane.vidVoiceId = audioId;
+          updateVideoOptionsControls(pane);
+        } catch (e) {
+          alert(String(e && e.message ? e.message : e));
+        }
+      };
+
+      const clearVoiceover = (pane) => {
+        if (!pane) return;
+        pane.vidVoiceId = null;
+        updateVideoOptionsControls(pane);
       };
 
       const attachImageFromClipboard = async (pane) => {
@@ -4568,6 +4968,41 @@
               json(res, 400, { error: 'url is required' });
               return true;
             }
+
+        // POST /api/chat/:id/audio { data_b64, mime_type? } -> { id }
+        const audioUpMatch = pathname.match(
+          new RegExp('^' + apiBase.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '/chat/([^/]+)/audio$')
+        );
+        if (req.method === 'POST' && audioUpMatch) {
+          const chatId = decodeURIComponent(audioUpMatch[1]);
+          try {
+            const body = await readJson(req);
+            const chat = ChatSession.load(chatId);
+            if (!chat) {
+              json(res, 404, { error: 'not found' });
+              return true;
+            }
+            const mt = (typeof body.mime_type === 'string' && body.mime_type.trim()) ? body.mime_type.trim() : 'application/octet-stream';
+            const b64 = (typeof body.data_b64 === 'string' && body.data_b64.trim()) ? body.data_b64.trim() : '';
+            if (!b64) {
+              json(res, 400, { error: 'data_b64 is required' });
+              return true;
+            }
+            const rec = {
+              kind: 'uploaded',
+              mime_type: mt,
+              data_b64: b64,
+              created_at: nowIso(),
+              provider: 'ui',
+            };
+            const id = chat.addAudio(rec);
+            chat.save();
+            json(res, 200, { id });
+          } catch (e) {
+            json(res, 500, { error: e.message || String(e) });
+          }
+          return true;
+        }
             const chat = ChatSession.load(chatId);
             if (!chat) {
               json(res, 404, { error: 'not found' });
@@ -5035,6 +5470,117 @@
           return true;
         }
 
+        // POST /api/chat/:id/generate_video { prompt, model_name?, options? }
+        const genVideoMatch = pathname.match(
+          new RegExp('^' + apiBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/chat/([^/]+)/generate_video$')
+        );
+        if (req.method === 'POST' && genVideoMatch) {
+          const chatId = decodeURIComponent(genVideoMatch[1]);
+          try {
+            const reqId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+            console.log(`[viib-etch-ui] /generate_video hit chatId=${String(chatId)} reqId=${reqId}`);
+          } catch {}
+          try {
+            const body = await readJson(req);
+            const prompt = body.prompt;
+            if (typeof prompt !== 'string' || !prompt.trim()) {
+              json(res, 400, { error: 'prompt is required' });
+              return true;
+            }
+
+            const existing = runByChatId.get(String(chatId));
+            if (existing && existing.running) {
+              json(res, 409, { error: 'chat is already running' });
+              return true;
+            }
+
+            const chat = ChatSession.load(chatId);
+            if (!chat) {
+              json(res, 404, { error: 'not found' });
+              return true;
+            }
+
+            const model_name = (typeof body.model_name === 'string' && body.model_name.trim())
+              ? body.model_name.trim()
+              : chat.model_name;
+            if (model_name && model_name !== chat.model_name) {
+              chat.model_name = model_name;
+              chat.save();
+            }
+
+            const llm = (typeof viib.openChat === 'function')
+              ? viib.openChat(chatId, null, {})
+              : new ChatLLM(model_name || chat.model_name, chat, null, {});
+            runByChatId.set(String(chatId), { llm, running: true, startedAt: Date.now() });
+
+            // Console logs similar to /send (but without tool streaming)
+            const consoleHooks = (typeof viib.consoleLogHooks === 'function')
+              ? viib.consoleLogHooks({
+                  prefix: `[${String(chatId).slice(0, 8)}] `,
+                  brief: false,
+                  response: true,
+                  reasoning: false,
+                  tools: false,
+                })
+              : null;
+            const callConsole = async (hookName, ...args) => {
+              try {
+                const fn = consoleHooks && consoleHooks[hookName];
+                if (typeof fn === 'function') await fn(...args);
+              } catch {}
+            };
+
+            // Wrap llm hooks so generateVideoSegment can trigger both UI events and console logs.
+            const reqStartAt = Date.now();
+            llm.hooks.onRequestStart = async () => {
+              await callConsole('onRequestStart');
+              emit(chatId, 'run.start', { ts: nowIso() });
+              emit(chatId, 'cycle.start', { ts: nowIso(), cycle_id: `cycle_${Date.now()}_1`, seq: 1 });
+            };
+            llm.hooks.onRequestDone = async (elapsed) => {
+              await callConsole('onRequestDone', elapsed);
+            };
+            llm.hooks.onResponseStart = async (sinceRequestDone) => {
+              await callConsole('onResponseStart', sinceRequestDone);
+              emit(chatId, 'assistant.response.start', { ts: nowIso(), cycle_id: `cycle_${reqStartAt}_1` });
+            };
+            llm.hooks.onResponseDone = async (content, elapsed) => {
+              await callConsole('onResponseDone', content, elapsed);
+              emit(chatId, 'assistant.response.done', { ts: nowIso(), cycle_id: `cycle_${reqStartAt}_1` });
+            };
+            emit(chatId, 'chat.user', { content: String(prompt), ts: nowIso() });
+
+            const optionsObj = (body.options && typeof body.options === 'object') ? body.options : {};
+
+            try {
+              // Ensure request lifecycle logs appear even if model-specific implementation
+              // doesn't trigger hooks as expected.
+              try { if (llm && llm.hooks && typeof llm.hooks.onRequestStart === 'function') await llm.hooks.onRequestStart(); } catch {}
+              const result = await llm.generateVideoSegment(String(prompt), optionsObj);
+              try { if (llm && llm.hooks && typeof llm.hooks.onRequestDone === 'function') await llm.hooks.onRequestDone(Date.now() - reqStartAt); } catch {}
+              try {
+                // Best-effort cleanup of orphaned assets (e.g., attached-but-never-used).
+                if (llm && llm.chat && typeof llm.chat.cleanupImages === 'function') {
+                  llm.chat.cleanupImages();
+                  llm.chat.save();
+                }
+              } catch {}
+              emit(chatId, 'chat.refresh', { ts: nowIso() });
+              emit(chatId, 'run.done', { ts: nowIso() });
+              json(res, 200, { success: true, result });
+            } catch (e) {
+              emit(chatId, 'run.error', { ts: nowIso(), error: e.message || String(e) });
+              json(res, 500, { error: e.message || String(e) });
+            } finally {
+              const r = runByChatId.get(String(chatId));
+              if (r) r.running = false;
+            }
+          } catch (e) {
+            json(res, 500, { error: e.message || String(e) });
+          }
+          return true;
+        }
+
         // POST /api/chat/:id/generate_image { prompt, model_name?, reference_image_ids?, options? }
         const genMatch = pathname.match(
           new RegExp('^' + apiBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/chat/([^/]+)/generate_image$')
@@ -5074,8 +5620,43 @@
               : new ChatLLM(model_name || chat.model_name, chat, null, {});
             runByChatId.set(String(chatId), { llm, running: true, startedAt: Date.now() });
 
-            emit(chatId, 'run.start', { ts: nowIso() });
-            emit(chatId, 'cycle.start', { ts: nowIso(), cycle_id: `cycle_${Date.now()}_1`, seq: 1 });
+            // Console logs similar to /send (but without tool streaming)
+            const consoleHooks = (typeof viib.consoleLogHooks === 'function')
+              ? viib.consoleLogHooks({
+                  prefix: `[${String(chatId).slice(0, 8)}] `,
+                  brief: false,
+                  response: true,
+                  reasoning: false,
+                  tools: false,
+                })
+              : null;
+            const callConsole = async (hookName, ...args) => {
+              try {
+                const fn = consoleHooks && consoleHooks[hookName];
+                if (typeof fn === 'function') await fn(...args);
+              } catch {}
+            };
+
+            const reqStartAt = Date.now();
+            llm.hooks.onRequestStart = async () => {
+              await callConsole('onRequestStart');
+              emit(chatId, 'run.start', { ts: nowIso() });
+              emit(chatId, 'cycle.start', { ts: nowIso(), cycle_id: `cycle_${Date.now()}_1`, seq: 1 });
+            };
+            llm.hooks.onRequestDone = async (elapsed) => {
+              await callConsole('onRequestDone', elapsed);
+            };
+            llm.hooks.onResponseStart = async (sinceRequestDone) => {
+              await callConsole('onResponseStart', sinceRequestDone);
+              emit(chatId, 'assistant.response.start', { ts: nowIso(), cycle_id: `cycle_${reqStartAt}_1` });
+            };
+            llm.hooks.onResponseDone = async (content, elapsed) => {
+              await callConsole('onResponseDone', content, elapsed);
+              emit(chatId, 'assistant.response.done', { ts: nowIso(), cycle_id: `cycle_${reqStartAt}_1` });
+            };
+
+            // Start lifecycle
+            try { if (llm && llm.hooks && typeof llm.hooks.onRequestStart === 'function') await llm.hooks.onRequestStart(); } catch {}
             emit(chatId, 'chat.user', { content: String(prompt), ts: nowIso() });
 
             const optionsObj = (body.options && typeof body.options === 'object') ? body.options : {};
@@ -5096,6 +5677,7 @@
 
             try {
               const result = await llm.generateImage(String(prompt), referenceImages, optionsObj);
+              try { if (llm && llm.hooks && typeof llm.hooks.onRequestDone === 'function') await llm.hooks.onRequestDone(Date.now() - reqStartAt); } catch {}
               try {
                 // Best-effort cleanup of orphaned images (e.g., attached-but-never-used).
                 if (llm && llm.chat && typeof llm.chat.cleanupImages === 'function') {
