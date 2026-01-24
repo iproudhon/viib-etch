@@ -4,6 +4,93 @@ const { spawn } = require('child_process');
 const fsp = require('fs/promises');
 const os = require('os');
 
+// ----------------------------
+// External tool registration (3rd-party extensions)
+// ----------------------------
+//
+// This registry is handler-only: the single source of tool *definitions* remains
+// viib-etch-tools.json (plus a few built-in pass-through tools).
+//
+// Third parties can register additional tool handlers at runtime, as long as their
+// tool definitions are present in viib-etch-tools.json.
+
+// Registry: toolName -> { handler, definition }
+const _externalTools = new Map();
+
+function _normalizeToOpenAIFunctionTool(def) {
+  // Accept either:
+  // - OpenAI function tool shape: { type:'function', function:{ name, description, parameters, ... } }
+  // - Flat shape: { type:'function', name, description, parameters, ... }
+  // and return the OpenAI function tool shape.
+  if (!def || typeof def !== 'object') {
+    throw new Error('tool definition must be an object');
+  }
+  if (def.type !== 'function') {
+    throw new Error('tool definition must have type="function"');
+  }
+  if (def.function && typeof def.function === 'object' && typeof def.function.name === 'string') {
+    return def;
+  }
+  if (typeof def.name === 'string') {
+    return {
+      type: 'function',
+      function: {
+        name: def.name,
+        description: def.description,
+        parameters: def.parameters,
+        strict: def.strict,
+        disallow_in_ask_mode: def.disallow_in_ask_mode,
+      },
+      ...(def.format ? { format: def.format } : {}),
+    };
+  }
+  throw new Error('invalid tool definition: expected {type:"function", function:{name}} or {type:"function", name}');
+}
+
+function registerTool(toolDefinition, handler, { overwrite = false, validateInFile = false, toolsFilePath = null } = {}) {
+  if (typeof handler !== 'function') {
+    throw new Error('registerTool: handler must be a function');
+  }
+
+  const normalized = normalizeToolDefinitions([_normalizeToOpenAIFunctionTool(toolDefinition)])[0];
+  const name = String(normalized && normalized.function && normalized.function.name ? normalized.function.name : '').trim();
+  if (!name) throw new Error('registerTool: toolDefinition missing function.name');
+
+  if (validateInFile) {
+    const p = toolsFilePath ? String(toolsFilePath) : path.join(__dirname, 'viib-etch-tools.json');
+    const defs = loadToolDefinitions(p);
+    const found = defs.find((d) => d && d.type === 'function' && d.function && d.function.name === name);
+    if (!found) {
+      throw new Error(`registerTool: tool not found in ${p}: ${name}`);
+    }
+  }
+
+  if (!overwrite && ((name in toolHandlers) || _externalTools.has(name))) {
+    throw new Error(`registerTool: tool already exists: ${name}`);
+  }
+  _externalTools.set(name, { handler, definition: normalized });
+  return name;
+}
+
+function registerTools(toolEntries, opts = {}) {
+  // Accept an array of { definition, handler } or [definition, handler]
+  const overwrite = !!opts.overwrite;
+  const validateInFile = !!opts.validateInFile;
+  const toolsFilePath = opts.toolsFilePath || null;
+  const list = Array.isArray(toolEntries) ? toolEntries : [];
+  const names = [];
+  for (const ent of list) {
+    if (!ent) continue;
+    if (Array.isArray(ent)) {
+      const [def, handler] = ent;
+      names.push(registerTool(def, handler, { overwrite, validateInFile, toolsFilePath }));
+    } else if (ent && typeof ent === 'object') {
+      names.push(registerTool(ent.definition, ent.handler, { overwrite, validateInFile, toolsFilePath }));
+    }
+  }
+  return names;
+}
+
 function loadToolDefinitions(filePath) {
   try {
     const content = fs.readFileSync(filePath, 'utf8');
@@ -1523,7 +1610,23 @@ const toolHandlers = {
 
 // Get tool definitions for API (OpenAI format)
 function getToolDefinitions(filePath, tool_names = []) {
-  const definitions = loadToolDefinitions(filePath);
+  const fileDefs = loadToolDefinitions(filePath);
+  const registeredDefs = Array.from(_externalTools.values()).map((t) => t.definition).filter(Boolean);
+  // Merge: file definitions first (canonical), then registered definitions that don't collide.
+  const seen = new Set();
+  const definitions = [];
+  for (const d of fileDefs) {
+    const n = d && d.type === 'function' && d.function && d.function.name ? String(d.function.name) : '';
+    if (n) seen.add(n);
+    definitions.push(d);
+  }
+  for (const d of registeredDefs) {
+    const n = d && d.type === 'function' && d.function && d.function.name ? String(d.function.name) : '';
+    if (!n) continue;
+    if (seen.has(n)) continue;
+    seen.add(n);
+    definitions.push(d);
+  }
   if (tool_names.length === 0) {
     return definitions;
   }
@@ -1545,7 +1648,8 @@ function getToolDefinitions(filePath, tool_names = []) {
 
 // Execute a tool by name
 async function executeTool(toolName, args, context) {
-  const handler = toolHandlers[toolName];
+  const name = String(toolName || '');
+  const handler = toolHandlers[name] || (_externalTools.get(name) && _externalTools.get(name).handler);
   if (!handler) {
     throw new Error(`Tool handler not found: ${toolName}`);
   }
@@ -1563,12 +1667,14 @@ async function executeTool(toolName, args, context) {
 
 // Get handler for a tool name
 function getToolHandler(toolName) {
-  return toolHandlers[toolName];
+  const name = String(toolName || '');
+  return toolHandlers[name] || (_externalTools.get(name) && _externalTools.get(name).handler);
 }
 
 // Check if a tool is available
 function hasTool(toolName) {
-  return toolName in toolHandlers;
+  const name = String(toolName || '');
+  return (name in toolHandlers) || _externalTools.has(name);
 }
 
 module.exports = {
@@ -1577,6 +1683,9 @@ module.exports = {
   executeTool,
   getToolHandler,
   hasTool,
-  toolHandlers
+  toolHandlers,
+  // 3rd-party tool registration (handlers only)
+  registerTool,
+  registerTools,
 };
 

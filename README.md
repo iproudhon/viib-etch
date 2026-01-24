@@ -375,6 +375,46 @@ const llm = ChatLLM.newChatSession('gpt-5.1-coder', false, tools);
 await llm.send('Read package.json and update the version to 2.0.0');
 ```
 
+### Registering 3rd-party tools (definitions + handlers)
+
+You can extend the tool system from outside by registering **tool definitions + handlers** at runtime.
+Registered tool definitions are included by `getToolDefinitions(...)`, and registered handlers are used by `executeTool(...)`.
+
+```javascript
+const { registerTool } = require('./viib-etch-tools');
+
+// Register a tool definition + handler (does not need to exist in viib-etch-tools.json)
+registerTool({
+  type: 'function',
+  function: {
+    name: 'calculator',
+    description: 'Evaluate a basic arithmetic expression and return the numeric result.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { expression: { type: 'string' } },
+      required: ['expression'],
+    },
+  },
+}, async (args) => {
+  const expr = String(args?.expression || '');
+  // Example only: validate input appropriately for your use case.
+  // eslint-disable-next-line no-new-func
+  const result = Function(`"use strict"; return (${expr});`)();
+  return { success: true, result };
+});
+```
+
+Then you can include it when building tools:
+
+```javascript
+const path = require('path');
+const { getToolDefinitions } = require('./viib-etch-tools');
+
+const toolsPath = path.join(__dirname, 'viib-etch-tools.json');
+const tools = getToolDefinitions(toolsPath, ['calculator']);
+```
+
 ### Persistent Chat Sessions
 
 ```javascript

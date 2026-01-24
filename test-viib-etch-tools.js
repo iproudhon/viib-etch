@@ -11,7 +11,8 @@ const {
   executeTool,
   getToolHandler,
   hasTool,
-  toolHandlers
+  toolHandlers,
+  registerTool,
 } = require('./viib-etch-tools');
 const { ChatSession, setChatsDir } = require('./viib-etch');
 
@@ -132,6 +133,64 @@ async function testGetToolHandler() {
     throw new Error('Non-existent tool handler should be undefined');
   }
   console.log('  ✓ Non-existent handler correctly returns undefined');
+
+}
+
+async function testRegisterToolAndGetToolDefinitions() {
+  console.log('\n=== Test: registerTool + getToolDefinitions (calculator) ===');
+
+  const toolsPath = path.join(__dirname, 'viib-etch-tools.json');
+
+  const calculatorDef = {
+    type: 'function',
+    function: {
+      name: 'calculator',
+      description: 'Evaluate a basic arithmetic expression and return the numeric result.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          expression: { type: 'string', description: 'Expression like "1+2*3"' },
+        },
+        required: ['expression'],
+      },
+    },
+  };
+
+  registerTool(calculatorDef, async (args) => {
+    const expr = String(args && args.expression ? args.expression : '');
+    if (!expr.trim()) throw new Error('missing expression');
+    // Minimal safe evaluator: only digits, whitespace, parentheses, and basic operators.
+    if (!/^[0-9+\-*/().\s]+$/.test(expr)) {
+      throw new Error('invalid characters in expression');
+    }
+    // eslint-disable-next-line no-new-func
+    const result = Function(`"use strict"; return (${expr});`)();
+    if (typeof result !== 'number' || Number.isNaN(result) || !Number.isFinite(result)) {
+      throw new Error('expression did not produce a finite number');
+    }
+    return { success: true, result };
+  });
+
+  // getToolDefinitions should include registered definitions.
+  const got = getToolDefinitions(toolsPath, ['calculator']);
+  if (got.length !== 1) {
+    throw new Error(`Expected 1 tool definition for calculator, got ${got.length}`);
+  }
+  if (got[0].type !== 'function' || !got[0].function || got[0].function.name !== 'calculator') {
+    throw new Error('calculator definition not returned in expected shape');
+  }
+  console.log('  ✓ calculator definition returned by getToolDefinitions');
+
+  // executeTool should dispatch to the registered handler.
+  const res = await executeTool('calculator', { expression: '1+2*3' }, {});
+  if (!res || res.success !== true) {
+    throw new Error(`Expected calculator success, got: ${JSON.stringify(res)}`);
+  }
+  if (res.result !== 7) {
+    throw new Error(`Expected 7, got ${res.result}`);
+  }
+  console.log('  ✓ calculator handler executed via executeTool');
 }
 
 async function testTodoWrite() {
@@ -1180,6 +1239,9 @@ async function runTests() {
     
     // Test 4: Get tool handler
     await testGetToolHandler();
+
+    // Test 4.1: registerTool + getToolDefinitions
+    await testRegisterToolAndGetToolDefinitions();
     
     // Test 5: todo_write tool
     const todoTestResult = await testTodoWrite();
@@ -1243,6 +1305,7 @@ module.exports = {
   testGetToolDefinitions,
   testHasTool,
   testGetToolHandler,
+  testRegisterToolAndGetToolDefinitions,
   testTodoWrite,
   testRunTerminalCmd,
   testEditFile,
