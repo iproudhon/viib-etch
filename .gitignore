@@ -12,7 +12,7 @@ yarn.lock
 .env.*.local
 
 # API keys and certificates
-.*-api-key
+.*-api-key*
 *.crt
 *.key
 
