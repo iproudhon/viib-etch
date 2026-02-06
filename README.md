@@ -4,14 +4,15 @@ A powerful Node.js library for building coding agents with LLM integration. Desi
 
 ## Features
 
-- 🤖 **Multi-Model Support**: Works with OpenAI, OpenRouter, and other compatible APIs
-- 💬 **Chat Session Management**: Persistent chat sessions with automatic saving/loading
+- 🤖 **Multi-Model Support**: Works with OpenAI (including GPT‑4o, GPT‑5.x, o‑series), OpenRouter, and Google Gemini/Veo
+- 💬 **Chat Session Management**: Persistent chat sessions with automatic saving/loading on disk
 - 🔧 **Tool Calling**: Built-in support for function calling with automatic tool execution
-- 🧾 **Tool Diffs**: Stores diffs/patches from file-modifying tools in `ChatSession.data`
-- 📡 **Streaming**: Real-time streaming of responses and reasoning
+- 🧾 **Tool Diffs**: Stores diffs/patches from file‑modifying tools in `ChatSession.data`
+- 🎬 **Image & Video Generation**: High‑level helpers for images and video segments (Gemini Veo and Sora via OpenAI Videos API)
+- 📡 **Streaming**: Real-time streaming of responses and reasoning (including o‑series reasoning traces)
 - 🎣 **Hooks System**: Comprehensive event hooks for monitoring requests, responses, and tool calls
-- 📝 **System Prompts**: Dynamic system prompt loading from files
-- 🔄 **API Routing**: Automatic routing between `/v1/chat/completions` and `/v1/responses` APIs
+- 📝 **System Prompts**: Dynamic system prompt loading from files with per‑model `system_prompt_file`
+- 🧭 **API Routing**: Automatic routing between `/v1/chat/completions` and `/v1/responses` APIs
 - 🛠️ **Rich Toolset**: Pre-built tools for file operations, terminal commands, code search, and more
 - 💾 **Session Persistence**: Save and restore chat sessions across restarts
 
@@ -41,7 +42,7 @@ await llm2.send('Now add error handling');
 
 ## Basic UI (mountable)
 
-`viib-etch` includes a minimal, embeddable UI in a single file: `viib-etch-ui.js`.
+`viib-etch` includes a minimal, embeddable web UI in a single file: `viib-etch-ui.js`.
 
 ### Mount into your own Node server
 
@@ -75,6 +76,15 @@ const ui = createViibEtchUI({ token: 'my-token' });
 ui.createHttpsServer({ port: 8443, certPath: 'zdte_cert.crt', keyPath: 'zdte_key.key' }).listen();
 ```
 
+#### UI authentication
+
+The UI requires a bearer token for all API calls:
+
+- **Single token**: Pass `token` to `createViibEtchUI({ token })` or set `VIIB_ETCH_UI_TOKEN`.
+- **Token file**: Put one token per line in `.viib-etch-tokens` (or override via `VIIB_ETCH_TOKENS_FILE`).
+
+When opened in the browser, the UI prompts for a token (stored in `localStorage`) and sends it as `Authorization: Bearer …`.
+
 ```javascript
 const { createChat } = require('./viib-etch');
 
@@ -85,6 +95,19 @@ const coder = createChat('gpt-5.1-coder', true, null, 'brief')
 // This request is fully functional, i.e. it does what normal coding agent, like Cursor IDE, does.
 response = await coder.send("Implement web-search tool using brave web search. Add test cases, run them, and fix issues if any.", { stream: true})
 ```
+
+### UI workflow
+
+The browser UI (`/ui`) is optimized for running viib‑etch agents interactively:
+
+- **Tabs** represent chat sessions. Right‑click / long‑press a tab to rename, delete, open the File Explorer, or view **Changes** (tracked edits per chat).
+- The footer lets you pick **Model** and **Reasoning** level (`default`, `off`, `low`, `medium`, `high`, `minimal`).
+- **Base directory** (`📁`): sets a per‑chat working directory for file/terminal tools.
+- **System prompt** (`📜`): opens the selected model’s `system_prompt_file` directly in a floating file editor.
+- **Image tools** (`🍌` button, 📋 clipboard, 🔗 URL): generate images and attach reference images.
+- **Video tools** (`🐵` button): generate video segments via Veo or Sora, with controls for extend/update, duration, aspect ratio, resolution, and voiceover.
+
+The UI communicates with the same Node server APIs described below and is entirely optional—the core library can be used headless.
 
 
 ## Configuration
@@ -179,6 +202,11 @@ File-modifying tools may store diffs and patch commands in the session’s data 
 Notes:
 - These fields are persisted if the session is persistent.
 - `_diff` / `_patchCommand` are stripped from the tool message content (they live in `session.data` instead).
+
+#### File originals & base directory
+
+- `session.data.fileOriginals[path]` stores the **original contents** of any file modified via `apply_patch` or `edit_file`, keyed by path.
+- `session.base_dir` (and `ChatLLM.setBaseDir()`) control the working directory used for file and terminal tools. The UI’s 📁 button calls `/api/chat/:id/base_dir` to keep this in sync.
 
 ### ChatLLM
 
