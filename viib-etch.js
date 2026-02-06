@@ -3248,7 +3248,7 @@ class ChatLLM {
    * - Assistant message block stores video id and audio id.
    * - Supports multiple modes: new segment, extend, update, frame-directed.
    * - Supports native audio generation or provided voiceover.
-   * - Uses Veo API via Google GenAI library.
+   * - Routes to provider-specific implementations based on model name.
    */
   async generateVideoSegment(prompt, options = {}) {
     if (typeof prompt !== 'string' || !prompt.trim()) {
@@ -3256,18 +3256,24 @@ class ChatLLM {
     }
 
     const model = this._ensureModelResolved();
+    const modelName = String(model.model || '').replace(/^google\//, '');
+    const lower = modelName.toLowerCase();
+
+    if (lower.includes('veo')) {
+      return this._generateVideoSegmentWithVeo(prompt, options);
+    }
+
+    if (lower.includes('sora')) {
+      return this._generateVideoSegmentWithSora(prompt, options);
+    }
+
+    throw new Error(`generateVideoSegment: model ${modelName} is not a supported video model (expected Veo or Sora)`);
+  }
+
+  async _generateVideoSegmentWithVeo(prompt, options = {}) {
+    const model = this._ensureModelResolved();
     const client = this.getClient();
     const modelName = model.model.replace(/^google\//, '');
-    const isVeoModel = modelName.toLowerCase().includes('veo');
-    
-    // Veo models are Gemini-based, but check for Veo explicitly
-    if (!isVeoModel) {
-      const isGemini = model._isGeminiModel();
-      if (!isGemini) {
-        throw new Error('generateVideoSegment: only Gemini/Veo models are supported');
-      }
-      throw new Error(`generateVideoSegment: model ${modelName} is not a Veo model`);
-    }
 
     const nowIso = () => new Date().toISOString();
 
@@ -3341,8 +3347,10 @@ class ChatLLM {
     }
 
     // Determine generation mode
-    const extendFrom = (typeof opts.extendFrom === 'string') ? String(opts.extendFrom) : null;
-    const updateTarget = (typeof opts.updateTarget === 'string') ? String(opts.updateTarget) : null;
+    // extendFrom/updateTarget are passed through as-is, but when extendFrom matches
+    // a stored ChatSession.images id we will also attach the video bytes inline.
+    const extendFrom = (typeof opts.extendFrom === 'string' && opts.extendFrom.trim()) ? String(opts.extendFrom).trim() : null;
+    const updateTarget = (typeof opts.updateTarget === 'string' && opts.updateTarget.trim()) ? String(opts.updateTarget).trim() : null;
     const firstFrame = opts.firstFrame || null;
     const lastFrame = opts.lastFrame || null;
 
@@ -3558,18 +3566,33 @@ class ChatLLM {
       if (lastFrameData) generateRequest.lastFrame = lastFrameData.inlineData;
 
       // Add extension/modification
+      // NOTE: Veo SDK/API uses `image`/`video` (inlineData) for conditioning. There is
+      // no reliable public `extendFrom` parameter in the unified GenAI SDK request shape.
+      // We keep `extendFrom` for our own bookkeeping, but we condition the request by
+      // attaching the prior video bytes when available.
       if (extendFrom) {
         const extendVideo = this.chat.getImage(extendFrom);
         if (extendVideo) {
           const videoB64 = extendVideo.data_b64 ?? extendVideo.data_base64 ?? extendVideo.data ?? null;
-          if (videoB64) {
+          console.log('[generateVideoSegment] extendFrom found in ChatSession.images, attaching bytes', {
+            extendFrom,
+            mime_type: String(extendVideo.mime_type || 'video/mp4'),
+            b64_len: (typeof videoB64 === 'string') ? videoB64.length : null,
+          });
+          if (videoB64 && typeof videoB64 === 'string') {
             generateRequest.video = {
               inlineData: {
                 data: String(videoB64),
-                mimeType: extendVideo.mime_type || 'video/mp4',
+                mimeType: String(extendVideo.mime_type || 'video/mp4'),
               },
             };
+          } else {
+            throw new Error(`generateVideoSegment: extendFrom video has no data_b64: ${extendFrom}`);
           }
+        } else {
+          console.log('[generateVideoSegment] extendFrom not found in ChatSession.images; cannot attach bytes. Passing value through only for bookkeeping.', {
+            extendFrom,
+          });
         }
       }
 
@@ -3590,6 +3613,7 @@ class ChatLLM {
 
       // Use library method to generate video
       if (typeof client.models !== 'undefined' && typeof client.models.generateVideos === 'function') {
+        console.log('[generateVideoSegment] generating video', generateRequest);
         operation = await client.models.generateVideos(generateRequest);
       } else {
         throw new Error('generateVideoSegment: client.models.generateVideos is not available. Please ensure @google/genai library is up to date.');
@@ -3604,7 +3628,6 @@ class ChatLLM {
           // Poll operation status using library method
           if (typeof client.operations !== 'undefined' && typeof client.operations.getVideosOperation === 'function') {
             operation = await client.operations.getVideosOperation({
-              // operation: operation.name || operation,
               operation,
             });
           } else {
@@ -3615,6 +3638,41 @@ class ChatLLM {
             throw new Error(`generateVideoSegment: operation failed: ${operation.error.message || JSON.stringify(operation.error)}`);
           }
         }
+      }
+
+      console.log('operation done', operation);
+
+      // Some operations can complete without returning generatedVideos, e.g. due to
+      // safety filtering / audio processing issues. Surface this clearly.
+      try {
+        const resp = operation && operation.response ? operation.response : null;
+        const filteredCount = resp && typeof resp.raiMediaFilteredCount === 'number' ? resp.raiMediaFilteredCount : null;
+        const reasons = resp && Array.isArray(resp.raiMediaFilteredReasons) ? resp.raiMediaFilteredReasons : null;
+        if (filteredCount && (!resp || !resp.generatedVideos)) {
+          const reasonText = (reasons && reasons.length) ? reasons.join(' ') : 'Media was filtered.';
+          // Persist an assistant message so UI/history shows the real reason.
+          const assistantMessage = {
+            role: 'assistant',
+            content: {
+              type: 'video_error',
+              provider: 'gemini',
+              prompt,
+              error: {
+                kind: 'rai_media_filtered',
+                message: reasonText,
+                count: filteredCount,
+                reasons: reasons || [],
+              },
+              operation: { name: operation?.name || null },
+            },
+          };
+          try { this.chat.addMessage(assistantMessage); } catch {}
+          try { this.chat.save(); } catch {}
+          throw new Error(`generateVideoSegment: media filtered (${filteredCount}): ${reasonText}`);
+        }
+      } catch (e) {
+        // If we threw above, rethrow; otherwise ignore parsing errors.
+        if (e && String(e.message || '').startsWith('generateVideoSegment: media filtered')) throw e;
       }
 
       // Extract video from completed operation
@@ -3648,6 +3706,7 @@ class ChatLLM {
             // Use the library download method directly.
             const tmp = require('os').tmpdir() + '/' + crypto.randomUUID() + '.mp4';
             try {
+              console.log('downloading video', 'from', videoFile, 'to', tmp);
               await client.files.download({ file: videoFile, downloadPath: tmp });
               videoBytes = fs.readFileSync(tmp);
             } finally {
@@ -3798,6 +3857,376 @@ class ChatLLM {
       audio: audioId,
       message: assistantMessage,
       operation: { name: operation?.name || null },
+    };
+  }
+
+  async _generateVideoSegmentWithSora(prompt, options = {}) {
+    const model = this._ensureModelResolved();
+    const client = this.getClient();
+    const modelName = String(model.model || '');
+
+    const nowIso = () => new Date().toISOString();
+
+    const guessMime = (p) => {
+      const ext = String(p || '').toLowerCase();
+      if (ext.endsWith('.mp4')) return 'video/mp4';
+      if (ext.endsWith('.webm')) return 'video/webm';
+      if (ext.endsWith('.mov')) return 'video/quicktime';
+      if (ext.endsWith('.mp3')) return 'audio/mpeg';
+      if (ext.endsWith('.wav')) return 'audio/wav';
+      if (ext.endsWith('.m4a')) return 'audio/mp4';
+      return 'application/octet-stream';
+    };
+
+    // Normalize options (reuse semantics from Veo path where sensible)
+    const opts = (options && typeof options === 'object') ? options : {};
+    // IMPORTANT: For Sora, do not coerce duration to a fixed set (e.g. 4/8/12).
+    // Pass through exactly what the user supplied.
+    //
+    // We keep two representations:
+    // - durationSeconds: a best-effort numeric value for our internal persisted options
+    // - secondsParam: the exact value we send to the API (stringified, trimmed)
+    const durationSecondsRaw = (opts.durationSeconds !== undefined && opts.durationSeconds !== null)
+      ? opts.durationSeconds
+      : 8;
+    const durationSeconds = (typeof durationSecondsRaw === 'number')
+      ? durationSecondsRaw
+      : Number(durationSecondsRaw);
+    const secondsParam = String(durationSecondsRaw).trim();
+    const aspectRatio = (opts.aspectRatio === '9:16') ? '9:16' : '16:9';
+    const generateAudio = opts.generateAudio !== false; // default true
+    const negativePrompt = (typeof opts.negativePrompt === 'string') ? opts.negativePrompt : undefined;
+    const seed = (typeof opts.seed === 'number') ? opts.seed : undefined;
+    const enhancePrompt = opts.enhancePrompt === true;
+    const lipsyncPrompt = (typeof opts.lipsyncPrompt === 'string') ? opts.lipsyncPrompt : undefined;
+
+    // Normalize referenceImages (same pattern as generateImage / Veo)
+    const refsRaw =
+      (opts.referenceImages === null || opts.referenceImages === undefined)
+        ? []
+        : (Array.isArray(opts.referenceImages) ? opts.referenceImages : [opts.referenceImages]);
+
+    const referenceImageIds = [];
+    for (const r of refsRaw) {
+      if (typeof r === 'string' && this.chat.getImage(r)) {
+        referenceImageIds.push(String(r));
+        continue;
+      }
+
+      if (typeof r === 'string') {
+        const abs = path.resolve(r);
+        const buf = fs.readFileSync(abs);
+        const rec = {
+          kind: 'reference',
+          mime_type: guessMime(abs),
+          data_b64: buf.toString('base64'),
+          created_at: nowIso(),
+          source_file_path: abs,
+        };
+        referenceImageIds.push(this.chat.addImage(rec));
+        continue;
+      }
+
+      if (!r || typeof r !== 'object') {
+        throw new Error('generateVideoSegment: each referenceImages entry must be an id string, a file path string, or an object');
+      }
+
+      const b64 = r.data_b64 ?? r.data_base64 ?? r.b64_json ?? r.data ?? null;
+      const hasB64 = typeof b64 === 'string' && b64.length > 0;
+      if (!hasB64) {
+        throw new Error('generateVideoSegment: reference image object must include data_b64');
+      }
+
+      const rec = {
+        id: r.id || crypto.randomUUID(),
+        kind: 'reference',
+        mime_type: r.mime_type || 'image/png',
+        data_b64: b64,
+        created_at: nowIso(),
+      };
+      referenceImageIds.push(this.chat.addImage(rec));
+    }
+
+    // Determine generation mode
+    const extendFrom = (typeof opts.extendFrom === 'string' && opts.extendFrom.trim()) ? String(opts.extendFrom).trim() : null;
+    const updateTarget = (typeof opts.updateTarget === 'string' && opts.updateTarget.trim()) ? String(opts.updateTarget).trim() : null;
+    const firstFrame = opts.firstFrame || null;
+    const lastFrame = opts.lastFrame || null;
+
+    let mode = 'new';
+    if (updateTarget) {
+      mode = 'update';
+    } else if (extendFrom) {
+      mode = 'extend';
+    } else if (firstFrame || lastFrame) {
+      mode = 'frame-directed';
+    }
+
+    // Handle voiceover audio if provided
+    let voiceoverAssetId = null;
+    const voiceoverOpt = (opts.voiceoverAudio !== undefined && opts.voiceoverAudio !== null)
+      ? opts.voiceoverAudio
+      : (opts.voiceover_audio !== undefined && opts.voiceover_audio !== null ? opts.voiceover_audio : null);
+
+    if (voiceoverOpt && !generateAudio) {
+      let voiceoverData = null;
+      let voiceoverMime = 'audio/mpeg';
+
+      if (typeof voiceoverOpt === 'string') {
+        if (this.chat.getAudio(voiceoverOpt)) {
+          voiceoverAssetId = String(voiceoverOpt);
+        } else {
+          const abs = path.resolve(voiceoverOpt);
+          const buf = fs.readFileSync(abs);
+          voiceoverMime = guessMime(abs);
+          voiceoverData = buf.toString('base64');
+        }
+      } else if (voiceoverOpt && typeof voiceoverOpt === 'object') {
+        if (voiceoverOpt.id && this.chat.getAudio(voiceoverOpt.id)) {
+          voiceoverAssetId = String(voiceoverOpt.id);
+        } else {
+          const b64 = voiceoverOpt.data_b64 ?? voiceoverOpt.data_base64 ?? voiceoverOpt.data ?? null;
+          if (!b64 || typeof b64 !== 'string') {
+            throw new Error('generateVideoSegment: voiceoverAudio object must include data_b64 or id');
+          }
+          voiceoverData = String(b64);
+          voiceoverMime = voiceoverOpt.mime_type || 'audio/mpeg';
+        }
+      }
+
+      if (voiceoverData && !voiceoverAssetId) {
+        const rec = {
+          kind: 'voiceover',
+          mime_type: voiceoverMime,
+          data_b64: voiceoverData,
+          created_at: nowIso(),
+        };
+        voiceoverAssetId = this.chat.addAudio(rec);
+      }
+    }
+
+    // Helper to build inline reference image data (for potential future Sora conditioning)
+    const refInlineParts = () => {
+      const parts = [];
+      for (const id of referenceImageIds) {
+        const rec = this.chat.getImage(id);
+        if (!rec) continue;
+        const b64 = rec.data_b64 ?? rec.data_base64 ?? rec.b64_json ?? rec.data ?? null;
+        if (!b64) continue;
+        parts.push({
+          data: String(b64),
+          mimeType: rec.mime_type || 'image/png',
+        });
+      }
+      return parts;
+    };
+
+    const getFrameData = (frame) => {
+      if (!frame) return null;
+      if (typeof frame === 'string') {
+        const rec = this.chat.getImage(frame);
+        if (!rec) return null;
+        const b64 = rec.data_b64 ?? rec.data_base64 ?? rec.b64_json ?? rec.data ?? null;
+        if (!b64) return null;
+        return {
+          data: String(b64),
+          mimeType: rec.mime_type || 'image/png',
+        };
+      }
+      if (frame && typeof frame === 'object') {
+        const b64 = frame.data_b64 ?? frame.data_base64 ?? frame.b64_json ?? frame.data ?? null;
+        if (!b64) return null;
+        return {
+          data: String(b64),
+          mimeType: frame.mime_type || 'image/png',
+        };
+      }
+      return null;
+    };
+
+    // Persist user intent (provider-agnostic)
+    const userIntent = {
+      role: 'user',
+      content: {
+        type: 'video_prompt',
+        prompt,
+        reference_images: referenceImageIds,
+        mode,
+        extend_from: extendFrom,
+        update_target: updateTarget,
+        options: {
+          durationSeconds,
+          aspectRatio,
+          generateAudio,
+          negativePrompt,
+          seed,
+          enhancePrompt,
+          lipsyncPrompt,
+          voiceover_audio: voiceoverAssetId,
+        },
+      },
+    };
+    this.chat.addMessage(userIntent);
+
+    // Build Sora/OpenAI request using Videos API
+    // NOTE: The OpenAI Responses API does not currently expose a "video_generation" tool.
+    // Sora video generation is done via the dedicated /videos endpoints.
+    const videoHistory = [];
+    const refParts = refInlineParts();
+    const firstFrameData = getFrameData(firstFrame);
+    const lastFrameData = getFrameData(lastFrame);
+
+    // Map aspectRatio to size; keep conservative defaults.
+    const size = (aspectRatio === '9:16') ? '720x1280' : '1280x720';
+
+    // Keep a config object for persistence/debugging. We only send supported fields.
+    const requestConfig = {
+      seconds: secondsParam,
+      size,
+      negative_prompt: negativePrompt,
+      seed,
+      enhance_prompt: enhancePrompt,
+      lipsync_prompt: lipsyncPrompt,
+      reference_images: refParts,
+      first_frame: firstFrameData,
+      last_frame: lastFrameData,
+      extend_from: extendFrom,
+      update_target: updateTarget,
+      generate_audio: generateAudio,
+      voiceover_audio: voiceoverAssetId,
+    };
+
+    const requestStartAt = Date.now();
+    try { await this.callHook('onRequestStart'); } catch {}
+
+    let response;
+    let videoBytes = null;
+    let videoMimeType = 'video/mp4';
+
+    try {
+      if (!client.videos || typeof client.videos.create !== 'function') {
+        throw new Error('generateVideoSegment: client.videos.create is not available. Please ensure the OpenAI SDK is up to date.');
+      }
+
+      // Start async render
+      response = await client.videos.create({
+        model: modelName,
+        prompt: String(prompt),
+        // Pass through exactly what the user provided (no coercion to 4/8/12).
+        seconds: secondsParam,
+        size,
+      });
+
+      const videoIdRemote = response && response.id ? String(response.id) : null;
+      videoHistory.push(videoIdRemote);
+      if (!videoIdRemote) {
+        throw new Error('generateVideoSegment: videos.create did not return an id');
+      }
+
+      // Poll until completed
+      if (typeof client.videos.retrieve !== 'function') {
+        throw new Error('generateVideoSegment: client.videos.retrieve is not available. Please ensure the OpenAI SDK is up to date.');
+      }
+      const pollInterval = 10000;
+      let job = response;
+      while (job && job.status && (job.status === 'queued' || job.status === 'in_progress' || job.status === 'processing')) {
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+        job = await client.videos.retrieve(videoIdRemote);
+      }
+
+      if (!job || job.status !== 'completed') {
+        const st = job && job.status ? String(job.status) : 'unknown';
+        const err = job && job.error ? (job.error.message || JSON.stringify(job.error)) : null;
+        throw new Error(`generateVideoSegment: video job did not complete (status=${st}${err ? `, error=${err}` : ''})`);
+      }
+
+      // Download MP4
+      if (typeof client.videos.downloadContent !== 'function') {
+        throw new Error('generateVideoSegment: client.videos.downloadContent is not available. Please ensure the OpenAI SDK is up to date.');
+      }
+
+      const contentResp = await client.videos.downloadContent(videoIdRemote, { variant: 'video' });
+      const chunks = [];
+      for await (const chunk of contentResp.body) {
+        chunks.push(chunk);
+      }
+      videoBytes = Buffer.concat(chunks);
+
+      if (!videoBytes || !videoBytes.length) {
+        throw new Error('generateVideoSegment: failed to download Sora video data');
+      }
+    } catch (error) {
+      throw new Error(`generateVideoSegment: Sora API call failed: ${error.message || String(error)}`);
+    } finally {
+      try { await this.callHook('onRequestDone', Date.now() - requestStartAt); } catch {}
+    }
+
+    // Store video in chat session
+    const videoBase64 = videoBytes.toString('base64');
+    const videoRec = {
+      kind: 'generated',
+      mime_type: videoMimeType,
+      data_b64: videoBase64,
+      created_at: nowIso(),
+      provider: 'openai',
+      prompt,
+      reference_images: referenceImageIds,
+      mode,
+      extend_from: extendFrom ? String(extendFrom) : null,
+      update_target: updateTarget ? String(updateTarget) : null,
+      audio: generateAudio ? { type: 'native' } : (voiceoverAssetId ? { type: 'voiceover', voiceover_asset: voiceoverAssetId } : null),
+      sora_operation: {
+        video_id: response?.id || null,
+        model: modelName,
+        config: requestConfig,
+        history: videoHistory,
+      },
+    };
+    const videoId = this.chat.addImage(videoRec);
+
+    // Note: native audio as separate asset can be added here if Sora returns it separately.
+    const audioId = null;
+
+    const assistantMessage = {
+      role: 'assistant',
+      content: {
+        type: 'video',
+        provider: 'openai',
+        prompt,
+        mode,
+        reference_images: referenceImageIds,
+        video: videoId,
+        extend_from: extendFrom ? String(extendFrom) : null,
+        update_target: updateTarget ? String(updateTarget) : null,
+        audio: generateAudio ? { type: 'native', audio_id: audioId } : (voiceoverAssetId ? { type: 'voiceover', voiceover_asset: voiceoverAssetId } : null),
+        operation: { video_id: response?.id || null },
+      },
+    };
+
+    const responseStartAt = Date.now();
+    try { await this.callHook('onResponseStart', 0); } catch {}
+    this.chat.addMessage(assistantMessage);
+    try { await this.callHook('onResponseDone', assistantMessage.content, Date.now() - responseStartAt); } catch {}
+
+    this.chat.data = this.chat.data && typeof this.chat.data === 'object' ? this.chat.data : {};
+    if (!Array.isArray(this.chat.data.sora_video_history)) {
+      this.chat.data.sora_video_history = [];
+    }
+    this.chat.data.sora_video_history.push({
+      user: userIntent,
+      result: { video: videoId, video_id: response?.id || null },
+    });
+    this.chat.save();
+
+    return {
+      provider: 'openai',
+      prompt,
+      mode,
+      reference_images: referenceImageIds,
+      video: videoId,
+      audio: audioId,
+      message: assistantMessage,
+      operation: { video_id: response?.id || null },
     };
   }
 }

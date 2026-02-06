@@ -864,6 +864,14 @@
         btnFolder.title = 'Set base directory for this chat';
         btnFolder.setAttribute('aria-label', 'Set base directory for this chat');
 
+        // System prompt button: opens the selected model's `system_prompt_file` in the file editor.
+        // Styling matches folder button (no border/background).
+        const btnSystemPrompt = document.createElement('button');
+        btnSystemPrompt.className = 've-iconbtn ve-folder';
+        btnSystemPrompt.textContent = '📜';
+        btnSystemPrompt.title = 'View & edit system prompt';
+        btnSystemPrompt.setAttribute('aria-label', 'View and edit system prompt');
+
         const btnImgClip = document.createElement('button');
         btnImgClip.className = 've-iconbtn';
         btnImgClip.textContent = '📋';
@@ -892,6 +900,7 @@
         controls.appendChild(reasoningLabel);
         controls.appendChild(reasoningSel);
         controls.appendChild(btnFolder);
+        controls.appendChild(btnSystemPrompt);
         controls.appendChild(btnImgClip);
         controls.appendChild(btnImgUrl);
         controls.appendChild(imgAttachBadge);
@@ -953,7 +962,7 @@
 
         const durationLabel = mkLabel('Duration');
         const durationInput = mkInput('4');
-        durationInput.title = 'Duration seconds (4–8)';
+        durationInput.title = 'Duration seconds (Sora supports 4/8/12; Veo supports 4–8)';
         durationInput.setAttribute('aria-label', 'Duration seconds');
         durationInput.value = '4';
         durationInput.inputMode = 'numeric';
@@ -1044,6 +1053,7 @@
         pane.modelSel = modelSel;
         pane.reasoningSel = reasoningSel;
         pane.btnFolder = btnFolder;
+        pane.btnSystemPrompt = btnSystemPrompt;
         pane.btnAction = btnAction;
         pane.btnImgClip = btnImgClip;
         pane.btnImgUrl = btnImgUrl;
@@ -1067,6 +1077,7 @@
         modelSel.addEventListener('change', () => setSelectedModel(modelSel.value));
         reasoningSel.addEventListener('change', () => setSelectedReasoningEffort(reasoningSel.value));
         btnFolder.addEventListener('click', () => openBaseDirModal(pane));
+        btnSystemPrompt.addEventListener('click', () => openSystemPromptEditor(pane));
         btnImgClip.addEventListener('click', () => attachImageFromClipboard(pane));
         btnImgUrl.addEventListener('click', () => attachImageFromUrlPrompt(pane));
         btnImgClear.addEventListener('click', () => clearAttachedImages(pane));
@@ -1242,8 +1253,8 @@
 
       const isVideoGenModel = (model_name) => {
         const s = modelSearchString(model_name);
-        // Simple heuristic: any Veo model or anything with "video" in the name.
-        return s.includes('veo') || s.includes('video');
+        // Simple heuristic: any Veo model, any Sora model, or anything with "video" in the name.
+        return s.includes('veo') || s.includes('sora') || s.includes('video');
       };
 
       const updateImageAttachControls = (pane) => {
@@ -1340,11 +1351,9 @@
             }
           }
           if (latestVid) {
+            // Only auto-fill Extend From. Update Target should stay user-controlled.
             if (pane.vidExtendFromInput && !String(pane.vidExtendFromInput.value || '').trim()) {
               pane.vidExtendFromInput.value = latestVid;
-            }
-            if (pane.vidUpdateTargetInput && !String(pane.vidUpdateTargetInput.value || '').trim()) {
-              pane.vidUpdateTargetInput.value = latestVid;
             }
           }
         } catch {}
@@ -1401,6 +1410,64 @@
 
         updateImageAttachControls(pane);
         updateVideoOptionsControls(pane);
+      };
+
+      const hydrateComposerFromChat = (pane) => {
+        if (!pane || !pane.chat) return;
+        const msgs = Array.isArray(pane.chat.messages) ? pane.chat.messages : [];
+
+        // Latest image_prompt -> hydrate reference images (only those that are still present)
+        try {
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            const m = msgs[i];
+            if (!m || m.role !== 'user') continue;
+            const c = m.content;
+            if (!c || typeof c !== 'object') continue;
+            if (c.type === 'image_prompt') {
+              const ids = Array.isArray(c.reference_images) ? c.reference_images.map(String).filter(Boolean) : [];
+              if (ids.length) {
+                pane.imageAttachIds = ids;
+              }
+              break;
+            }
+          }
+        } catch {}
+
+        // Latest video_prompt -> hydrate video options fields
+        try {
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            const m = msgs[i];
+            if (!m || m.role !== 'user') continue;
+            const c = m.content;
+            if (!c || typeof c !== 'object') continue;
+            if (c.type === 'video_prompt') {
+              if (pane.vidExtendFromInput) pane.vidExtendFromInput.value = c.extend_from ? String(c.extend_from) : '';
+              if (pane.vidUpdateTargetInput) pane.vidUpdateTargetInput.value = c.update_target ? String(c.update_target) : '';
+              const opts = c.options && typeof c.options === 'object' ? c.options : {};
+              if (pane.vidDurationInput && opts.durationSeconds !== undefined && opts.durationSeconds !== null) {
+                pane.vidDurationInput.value = String(opts.durationSeconds);
+              }
+              if (pane.vidAspectInput && opts.aspectRatio) {
+                pane.vidAspectInput.value = String(opts.aspectRatio);
+              }
+              if (pane.vidResolutionInput && opts.resolution) {
+                pane.vidResolutionInput.value = String(opts.resolution);
+              }
+              if (pane.vidAudioGenChk && typeof opts.generateAudio === 'boolean') {
+                pane.vidAudioGenChk.checked = !!opts.generateAudio;
+              }
+              // Remember voiceover id if present
+              if (opts.voiceover_audio) {
+                pane.vidVoiceId = String(opts.voiceover_audio);
+              }
+              break;
+            }
+          }
+        } catch {}
+
+        // Refresh visibility/badges
+        try { updateImageAttachControls(pane); } catch {}
+        try { updateVideoOptionsControls(pane); } catch {}
       };
 
       const groupToolOutputsForReplay = (chat) => {
@@ -3472,6 +3539,135 @@
         }
       };
 
+      // Open the selected model's `system_prompt_file` in the file editor.
+      // The full path is shown in the floating window title.
+      const openSystemPromptEditor = async (pane) => {
+        if (!pane || !pane.chatId) {
+          alert('Open a chat first to edit the system prompt.');
+          return;
+        }
+        const fe = ensureFileExplorerWindow();
+
+        // Use the model selected in the pane's Model select box (preferred), falling back to chat.model_name.
+        const modelName = (pane.modelSel && pane.modelSel.value)
+          ? String(pane.modelSel.value)
+          : ((pane.chat && pane.chat.model_name) ? String(pane.chat.model_name) : getSelectedModel());
+
+        const modelRec = resolveModelRec(modelName);
+        const sysPathRaw = modelRec && (modelRec.system_prompt_file || modelRec.systemPromptFile)
+          ? String(modelRec.system_prompt_file || modelRec.systemPromptFile)
+          : '';
+        const pathStr = sysPathRaw.trim();
+        if (!pathStr) {
+          alert('This model does not define a system_prompt_file.');
+          return;
+        }
+
+        // Enter edit mode directly for the system prompt: fullscreen editor, editable.
+        fe.viewOnly = false;
+        fe.editMode = true;
+        fe.mode = 'explorer';
+        fe.currentPath = pathStr;
+        fe.originalText = '';
+
+        // Show the full virtual path in the floating window title.
+        if (fe.titleEl) {
+          fe.titleEl.textContent = pathStr;
+        }
+
+        // Load the system prompt file using the same file API used by the file explorer.
+        try {
+          const res = await apiFetch(
+            `/chat/${encodeURIComponent(pane.chatId)}/file?path=${encodeURIComponent(pathStr)}`,
+            { method: 'GET' },
+          );
+          const content = typeof res === 'string' ? res : (res && res.content) || '';
+          fe.originalText = String(content || '');
+        } catch (e) {
+          // If the system prompt file fails to load, start empty but keep editor open.
+          fe.originalText = '';
+          updateFileExplorerStatus(String(e && e.message ? e.message : e));
+        }
+
+        // Populate textarea fallback immediately.
+        if (fe.editorEl) {
+          fe.editorEl.value = fe.originalText;
+          fe.editorEl.readOnly = false;
+        }
+
+        // Try to upgrade to Monaco in the background, mirroring openFileInEditor.
+        (async () => {
+          try {
+            const host = fe.editorHostEl;
+            const diffHost = fe.diffHostEl;
+            if (!host || !diffHost) return;
+
+            const monaco = fe.monaco || (await loadMonaco());
+            fe.monaco = monaco;
+
+            if (!fe.monacoEditor) {
+              fe.monacoEditor = monaco.editor.create(host, {
+                value: '',
+                language: 'plaintext',
+                theme: 'vs',
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                automaticLayout: false,
+                readOnly: false,
+                lineNumbers: 'on',
+                wordWrap: 'on',
+                fontSize: isMobile() ? 12 : 13,
+                fontFamily:
+                  'ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace',
+              });
+            }
+            if (!fe.monacoDiffEditor) {
+              fe.monacoDiffEditor = monaco.editor.createDiffEditor(diffHost, {
+                theme: 'vs',
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                automaticLayout: false,
+                readOnly: false,
+                renderSideBySide: true,
+              });
+            }
+
+            // Dispose prior models.
+            try { if (fe.originalModel) fe.originalModel.dispose(); } catch {}
+            try { if (fe.modifiedModel) fe.modifiedModel.dispose(); } catch {}
+            fe.originalModel = null;
+            fe.modifiedModel = null;
+
+            const lang = inferMonacoLanguage(fe.currentPath || pathStr);
+            const uriBase = `inmemory://model/${Date.now()}_${Math.random().toString(16).slice(2)}/${encodeURIComponent(fe.currentPath || 'system-prompt')}`;
+            fe.originalModel = monaco.editor.createModel(fe.originalText, lang, monaco.Uri.parse(uriBase + '?o=1'));
+            fe.modifiedModel = monaco.editor.createModel(fe.originalText, lang, monaco.Uri.parse(uriBase + '?m=1'));
+
+            try { fe.monacoEditor.setModel(fe.modifiedModel); } catch {}
+            try { fe.monacoDiffEditor.setModel({ original: fe.originalModel, modified: fe.modifiedModel }); } catch {}
+
+            if (typeof fe._applyEditorMode === 'function') fe._applyEditorMode();
+            layoutFileExplorerEditors();
+          } catch {
+            // Keep textarea fallback if Monaco fails.
+          }
+        })();
+
+        // Make sure window is visible and not minimized.
+        try {
+          const prefs = loadFileExplorerPrefs();
+          if (prefs.minimized && fe.windowEl) {
+            // Simulate restore by clearing minimized flag and re-layout.
+            fe.isMinimized = false;
+            if (fe.bodyEl) fe.bodyEl.style.display = 'flex';
+            if (fe.topRowEl) fe.topRowEl.style.display = 'flex';
+            layoutFileExplorerEditors();
+          }
+        } catch {}
+
+        updateFileExplorerStatus(fileBaseName(pathStr));
+      };
+
       const openChatTabMenu = (evt, chatSummary) => {
         evt.preventDefault();
         const id = String(chatSummary.id);
@@ -3606,6 +3802,28 @@
           pane.loaded = true;
           pane.live = createLiveState();
           state.chat = pane.chat;
+
+          // Sync footer selectors to the chat's saved settings.
+          try {
+            if (pane.chat && pane.chat.model_name) {
+              setSelectedModel(String(pane.chat.model_name));
+              if (pane.modelSel) pane.modelSel.value = String(pane.chat.model_name);
+            }
+          } catch {}
+          try {
+            // reasoning effort may be stored on chat.data.reasoning_effort (best-effort)
+            const re = pane.chat && pane.chat.data && typeof pane.chat.data === 'object' ? pane.chat.data.reasoning_effort : null;
+            if (re) {
+              setSelectedReasoningEffort(String(re));
+              if (pane.reasoningSel) pane.reasoningSel.value = String(re);
+            }
+          } catch {}
+
+          // Hydrate image/video option controls from latest message blocks.
+          try {
+            hydrateComposerFromChat(pane);
+          } catch {}
+
           await renderChat(pane, pane.chat, true);
         } else {
           state.chat = pane.chat || null;
@@ -3949,14 +4167,28 @@
           const aspectRaw = pane.vidAspectInput ? String(pane.vidAspectInput.value || '').trim() : '';
           const resolutionRaw = pane.vidResolutionInput ? String(pane.vidResolutionInput.value || '').trim() : '';
 
+          // Duration handling:
+          // - For Veo models, keep the existing safe clamp to 4–8 seconds.
+          // - For Sora (and other) video models, do not clamp; pass through what the user typed.
           const durationSecondsParsed = (() => {
             const n = Number(durationSecondsRaw);
-            if (!Number.isFinite(n)) return 4;
-            // Veo expects 4..8
-            return Math.max(4, Math.min(8, Math.floor(n)));
+            const numeric = Number.isFinite(n) ? n : 4;
+
+            const modelLower = String(model_name || '').toLowerCase();
+            const isVeoModel = modelLower.includes('veo');
+
+            if (isVeoModel) {
+              // Veo expects 4..8
+              return Math.max(4, Math.min(8, Math.floor(numeric)));
+            }
+
+            // For Sora/other video models, just use the numeric value (no clamping).
+            return numeric;
           })();
 
-          const aspectRatio = (aspectRaw === '9:16') ? '9:16' : '16:9';
+          // Normalize common aspect inputs.
+          const aspectNorm = String(aspectRaw || '').replace(/\s+/g, '').toLowerCase();
+          const aspectRatio = (aspectNorm === '9:16' || aspectNorm === '9x16') ? '9:16' : '16:9';
           const generateAudio = pane.vidAudioGenChk ? !!pane.vidAudioGenChk.checked : true;
 
           params.options = {
@@ -4534,7 +4766,12 @@
         if (req.method === 'GET' && pathname === apiBase + '/models') {
           try {
             const models = ChatModel.loadModels();
-            json(res, 200, models.map((m) => ({ name: m.name, model: m.model })));
+            // Include system_prompt_file so the UI can edit it.
+            json(res, 200, models.map((m) => ({
+              name: m.name,
+              model: m.model,
+              system_prompt_file: m.system_prompt_file || null,
+            })));
           } catch (e) {
             json(res, 500, { error: e.message || String(e) });
           }
@@ -5556,6 +5793,15 @@
               // Ensure request lifecycle logs appear even if model-specific implementation
               // doesn't trigger hooks as expected.
               try { if (llm && llm.hooks && typeof llm.hooks.onRequestStart === 'function') await llm.hooks.onRequestStart(); } catch {}
+
+              // Debug: confirm parameters actually passed to generateVideoSegment
+              try {
+                console.log(
+                  `[viib-etch-ui] generateVideoSegment chatId=${String(chatId)} model=${String(llm && llm.model_name ? llm.model_name : model_name || chat.model_name || '')} ` +
+                  `options=${JSON.stringify(optionsObj)}`
+                );
+              } catch {}
+
               const result = await llm.generateVideoSegment(String(prompt), optionsObj);
               try { if (llm && llm.hooks && typeof llm.hooks.onRequestDone === 'function') await llm.hooks.onRequestDone(Date.now() - reqStartAt); } catch {}
               try {
