@@ -227,6 +227,10 @@
         cycles: new Map(),
         mdTimers: new Map(),
         pendingUserEcho: null,
+        // SSE ordering + gap detection (uses EventSource lastEventId when server emits `id:`)
+        lastEventSeq: null,
+        hadGap: false,
+        streamErrored: false,
       });
 
       // Clipboard helper: always write PNG for compatibility.
@@ -3933,6 +3937,41 @@
       const ensureSSE = (pane) => {
         if (!pane || !pane.chatId) return;
         closeSSE(pane);
+
+        const liveCheckAndUpdateSeq = (evObj) => {
+          try {
+            if (!pane || !pane.live) return true;
+            const live = pane.live;
+            const rawId = evObj && evObj.lastEventId != null ? String(evObj.lastEventId) : '';
+            if (!rawId) return true; // server may not send id; best-effort
+            const n = Number(rawId);
+            if (!Number.isFinite(n) || n <= 0) return true;
+            const seq = Math.floor(n);
+            if (live.lastEventSeq === null || live.lastEventSeq === undefined) {
+              live.lastEventSeq = seq;
+              return true;
+            }
+            if (seq === live.lastEventSeq) {
+              // Duplicate (common after reconnect replay)
+              return false;
+            }
+            if (seq === live.lastEventSeq + 1) {
+              live.lastEventSeq = seq;
+              return true;
+            }
+            if (seq < live.lastEventSeq) {
+              // Stale/out-of-order older event
+              return false;
+            }
+            // seq > last + 1 => gap detected
+            live.hadGap = true;
+            live.lastEventSeq = seq;
+            return true;
+          } catch {
+            return true;
+          }
+        };
+
         const t = getToken();
         const url =
           (options.apiBase || '').replace(/\/+$/, '') +
@@ -3940,7 +3979,26 @@
           (t ? `?token=${encodeURIComponent(t)}` : '');
         const ev = new EventSource(url);
         pane.sse = ev;
-        ev.addEventListener('run.start', () => {
+
+        // Reset per-connection ordering state
+        try {
+          if (pane.live) {
+            pane.live.lastEventSeq = null;
+            pane.live.hadGap = false;
+            pane.live.streamErrored = false;
+          }
+        } catch {}
+
+        // Track SSE errors (EventSource auto-reconnects)
+        ev.addEventListener('error', () => {
+          try {
+            if (pane && pane.live) pane.live.streamErrored = true;
+          } catch {}
+        });
+
+        ev.addEventListener('run.start', (e) => {
+          // run.start is structural; we still want ordering dedupe
+          if (!liveCheckAndUpdateSeq(e)) return;
           pane.live.running = true;
           setRunning(pane, true);
           const id = String(pane.chatId || '');
@@ -3951,6 +4009,7 @@
           }
         });
         ev.addEventListener('cycle.start', (e) => {
+          if (!liveCheckAndUpdateSeq(e)) return;
           try {
             const data = JSON.parse(e.data || '{}');
             pane.live.currentCycleId = data.cycle_id || null;
@@ -3959,6 +4018,7 @@
           } catch {}
         });
         ev.addEventListener('chat.user', (e) => {
+          if (!liveCheckAndUpdateSeq(e)) return;
           try {
             const data = JSON.parse(e.data || '{}');
             const content = String(data.content || '');
@@ -3971,6 +4031,7 @@
           } catch {}
         });
         ev.addEventListener('assistant.reasoning.start', (e) => {
+          if (!liveCheckAndUpdateSeq(e)) return;
           try {
             const data = JSON.parse(e.data || '{}');
             const c = liveEnsureReasoningPanel(pane, data.cycle_id || pane.live.currentCycleId);
@@ -3980,6 +4041,9 @@
           } catch {}
         });
         ev.addEventListener('assistant.reasoning.delta', (e) => {
+          if (!liveCheckAndUpdateSeq(e)) return;
+          // If we detected any missing SSE events, avoid mixing partial reasoning deltas.
+          if (pane.live && pane.live.hadGap) return;
           try {
             const data = JSON.parse(e.data || '{}');
             stopThinking(pane);
@@ -3996,6 +4060,7 @@
           } catch {}
         });
         ev.addEventListener('assistant.reasoning.done', (e) => {
+          if (!liveCheckAndUpdateSeq(e)) return;
           try {
             const data = JSON.parse(e.data || '{}');
             const c = pane.live.cycles.get(String(data.cycle_id || ''));
@@ -4005,6 +4070,7 @@
           } catch {}
         });
         ev.addEventListener('assistant.response.start', (e) => {
+          if (!liveCheckAndUpdateSeq(e)) return;
           try {
             const data = JSON.parse(e.data || '{}');
             const c = liveEnsureAssistantCycle(pane, data.cycle_id || pane.live.currentCycleId);
@@ -4014,6 +4080,9 @@
           } catch {}
         });
         ev.addEventListener('assistant.response.delta', (e) => {
+          if (!liveCheckAndUpdateSeq(e)) return;
+          // If we detected any missing SSE events, avoid mixing partial response deltas.
+          if (pane.live && pane.live.hadGap) return;
           try {
             const data = JSON.parse(e.data || '{}');
             stopThinking(pane);
@@ -4027,6 +4096,7 @@
           } catch {}
         });
         ev.addEventListener('assistant.response.done', (e) => {
+          if (!liveCheckAndUpdateSeq(e)) return;
           try {
             const data = JSON.parse(e.data || '{}');
             const c = pane.live.cycles.get(String(data.cycle_id || ''));
@@ -4035,6 +4105,7 @@
           } catch {}
         });
         ev.addEventListener('tool.start', (e) => {
+          if (!liveCheckAndUpdateSeq(e)) return;
           try {
             const data = JSON.parse(e.data || '{}');
             stopThinking(pane);
@@ -4046,6 +4117,7 @@
           } catch {}
         });
         ev.addEventListener('tool.data', (e) => {
+          if (!liveCheckAndUpdateSeq(e)) return;
           try {
             const data = JSON.parse(e.data || '{}');
             stopThinking(pane);
@@ -4065,6 +4137,7 @@
           } catch {}
         });
         ev.addEventListener('tool.end', (e) => {
+          if (!liveCheckAndUpdateSeq(e)) return;
           try {
             const data = JSON.parse(e.data || '{}');
             stopThinking(pane);
@@ -4096,7 +4169,8 @@
             liveAutoScrollIfArmed(pane);
           } catch {}
         });
-        ev.addEventListener('run.done', async () => {
+        ev.addEventListener('run.done', async (e) => {
+          if (!liveCheckAndUpdateSeq(e)) return;
           pane.live.running = false;
           setRunning(pane, false);
           stopThinking(pane);
@@ -4106,12 +4180,28 @@
             st.running = false;
           }
           refreshChats().catch(() => {});
+
+          // Defensive: if we detected missing events or an SSE error, force a canonical refresh.
+          // The backend typically emits `chat.refresh` at end of runs, but this protects us
+          // if that event was missed.
+          try {
+            if (pane.live && (pane.live.hadGap || pane.live.streamErrored)) {
+              const chat = await apiFetch(`/chat/${encodeURIComponent(pane.chatId)}`);
+              pane.chat = chat;
+              state.chat = chat;
+              pane.loaded = true;
+              pane.live = createLiveState();
+              await renderChat(pane, chat, true);
+            }
+          } catch {}
+
           // If this pane is not active anymore, disconnect after run finishes (policy: active or running only)
           if (String(state.chatId || '') !== String(pane.chatId || '')) {
             closeSSE(pane);
           }
         });
         ev.addEventListener('run.error', (e) => {
+          if (!liveCheckAndUpdateSeq(e)) return;
           setRunning(pane, false);
           stopThinking(pane);
           console.error('run.error', e && e.data);
@@ -4127,7 +4217,9 @@
         });
 
         // Non-streaming operations (image generation) request a full refresh.
-        ev.addEventListener('chat.refresh', async () => {
+        ev.addEventListener('chat.refresh', async (e) => {
+          // chat.refresh is our main resync mechanism; still dedupe by seq
+          if (!liveCheckAndUpdateSeq(e)) return;
           try {
             const chat = await apiFetch(`/chat/${encodeURIComponent(pane.chatId)}`);
             pane.chat = chat;
@@ -4730,6 +4822,24 @@
       const busByChatId = new Map(); // chatId -> EventEmitter
       const runByChatId = new Map(); // chatId -> { llm, running:boolean, startedAt }
 
+      // ----------------------------
+      // SSE sequencing + replay buffer
+      // ----------------------------
+      // Each chat gets a monotonically increasing event sequence number.
+      // We also keep a bounded in-memory history per chat so EventSource reconnects
+      // (via Last-Event-ID) can replay missed events.
+      const eventSeqByChatId = new Map(); // chatId -> number
+      const eventHistoryByChatId = new Map(); // chatId -> Array<{event,data,ts,seq}>
+      const MAX_SSE_HISTORY = 1500;
+
+      function nextEventSeq(chatId) {
+        const id = String(chatId);
+        const cur = eventSeqByChatId.get(id) || 0;
+        const next = cur + 1;
+        eventSeqByChatId.set(id, next);
+        return next;
+      }
+
       function getBus(chatId) {
         const id = String(chatId);
         let b = busByChatId.get(id);
@@ -4742,8 +4852,24 @@
       }
 
       function emit(chatId, event, data) {
-        const b = getBus(chatId);
-        b.emit('event', { event, data, ts: Date.now() });
+        const id = String(chatId);
+        const b = getBus(id);
+        const payload = { event, data, ts: Date.now(), seq: nextEventSeq(id) };
+        // Store in bounded replay buffer
+        try {
+          let arr = eventHistoryByChatId.get(id);
+          if (!arr) {
+            arr = [];
+            eventHistoryByChatId.set(id, arr);
+          }
+          arr.push(payload);
+          if (arr.length > MAX_SSE_HISTORY) {
+            arr.splice(0, arr.length - MAX_SSE_HISTORY);
+          }
+        } catch {
+          // ignore
+        }
+        b.emit('event', payload);
       }
 
       function checkAuth(req, query) {
@@ -5380,14 +5506,44 @@
           res.setHeader('x-accel-buffering', 'no');
           res.write(`event: hello\ndata: ${JSON.stringify({ ok: true, ts: Date.now() })}\n\n`);
 
-          const b = getBus(chatId);
-          const onEv = (payload) => {
+          const writeSsePayload = (payload) => {
             try {
+              if (payload && payload.seq !== undefined && payload.seq !== null) {
+                res.write(`id: ${String(payload.seq)}\n`);
+              }
               res.write(`event: ${payload.event}\n`);
               res.write(`data: ${JSON.stringify(payload.data || {})}\n\n`);
             } catch {
               // ignore
             }
+          };
+
+          // Replay any missed events using Last-Event-ID (EventSource will send this on reconnect).
+          let lastSeenSeq = 0;
+          try {
+            const hdr = req.headers && (req.headers['last-event-id'] || req.headers['Last-Event-ID']);
+            const fromQ = query && typeof query.from === 'string' ? Number(query.from) : NaN;
+            const fromHdr = hdr ? Number(hdr) : NaN;
+            if (Number.isFinite(fromHdr) && fromHdr > 0) lastSeenSeq = Math.floor(fromHdr);
+            else if (Number.isFinite(fromQ) && fromQ > 0) lastSeenSeq = Math.floor(fromQ);
+          } catch {}
+
+          if (lastSeenSeq > 0) {
+            try {
+              const hist = eventHistoryByChatId.get(String(chatId)) || [];
+              for (const p of hist) {
+                if (p && typeof p.seq === 'number' && p.seq > lastSeenSeq) {
+                  writeSsePayload(p);
+                }
+              }
+            } catch {
+              // ignore
+            }
+          }
+
+          const b = getBus(chatId);
+          const onEv = (payload) => {
+            writeSsePayload(payload);
           };
           b.on('event', onEv);
 
@@ -5691,6 +5847,9 @@
                     llm.chat.save();
                   }
                 } catch {}
+                // Always refresh after a run so the UI converges to canonical persisted chat,
+                // even if some SSE deltas were missed during streaming.
+                emit(chatId, 'chat.refresh', { ts: nowIso() });
                 emit(chatId, 'run.done', { ts: nowIso() });
               } catch (e) {
                 emit(chatId, 'run.error', { ts: nowIso(), error: e.message || String(e) });
