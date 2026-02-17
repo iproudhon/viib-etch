@@ -73,7 +73,11 @@ http.createServer((req, res) => {
 ```javascript
 const { createViibEtchUI } = require('./viib-etch-ui');
 const ui = createViibEtchUI({ token: 'my-token' });
-ui.createHttpsServer({ port: 8443, certPath: 'zdte_cert.crt', keyPath: 'zdte_key.key' }).listen();
+ui.createHttpsServer({
+  port: 8443,
+  certPath: 'bobthe_server.crt',
+  keyPath: 'bobthe_sever.key',
+}).listen();
 ```
 
 #### UI authentication

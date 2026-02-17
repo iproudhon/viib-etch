@@ -97,10 +97,13 @@
           mode: 'explorer',
           // Changes tab: 'current' | 'original' | 'diff'
           changesTab: 'current',
+          // Mobile changes mode: show file list overlay instead of split panes.
+          changesShowFileList: false,
           changesTabsEl: null,
           btnTabCurrentEl: null,
           btnTabOriginalEl: null,
           btnTabDiffEl: null,
+          btnFilesEl: null,
           pathInputEl: null,
           statusEl: null,
           isMinimized: false,
@@ -683,6 +686,15 @@
           .ve-top{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;padding:10px 12px;background:#ffffff;border-bottom:1px solid rgba(17,24,39,0.10);}
           .ve-iconbtn{border:1px solid rgba(17,24,39,0.14);background:#f3f4f6;color:#111827;border-radius:3px;padding:6px 10px;cursor:pointer;font:inherit;}
           .ve-iconbtn:hover{background:#e5e7eb;}
+          /* iOS Safari: keep button text size stable and font consistent */
+          .ve-iconbtn{-webkit-text-size-adjust:100%;text-size-adjust:100%;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";}
+          /* File Explorer/Changes toolbar: force UI font (avoid accidental monospace inheritance on iOS) */
+          [data-ve-file-window="1"] [data-ve-fe-toolbar="1"],
+          [data-ve-file-window="1"] [data-ve-fe-toolbar="1"] button{
+            font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji" !important;
+            -webkit-text-size-adjust:100% !important;
+            text-size-adjust:100% !important;
+          }
           .ve-iconbtn.ve-config{border:none;background:transparent;padding:6px 8px;}
           .ve-iconbtn.ve-config:hover{background:rgba(17,24,39,0.05);}
           .ve-iconbtn.ve-folder{border:none;background:transparent;padding:6px 8px;}
@@ -2728,12 +2740,17 @@
         body.style.flex = '1 1 auto';
         body.style.minHeight = '0';
         body.style.background = '#f9fafb';
+        // Enables absolute-positioned mobile overlays inside this region.
+        body.style.position = 'relative';
 
         const sidebar = document.createElement('div');
         sidebar.style.flex = '0 0 auto';
-        sidebar.style.width = isMobile() ? '40%' : '32%';
-        sidebar.style.minWidth = '140px';
-        sidebar.style.maxWidth = '420px';
+        // Sidebar sizing:
+        // - Mobile: % is fine (and mobile Changes uses an overlay anyway).
+        // - Desktop/web: shrink-to-fit (content width) with a cap.
+        sidebar.style.width = isMobile() ? '40%' : 'fit-content';
+        sidebar.style.minWidth = isMobile() ? '140px' : '160px';
+        sidebar.style.maxWidth = isMobile() ? '420px' : '420px';
         sidebar.style.borderRight = '1px solid rgba(17,24,39,0.06)';
         sidebar.style.background = '#ffffff';
         sidebar.style.display = 'flex';
@@ -2757,6 +2774,7 @@
         editorWrap.style.flexDirection = 'column';
 
         const editorToolbar = document.createElement('div');
+        editorToolbar.setAttribute('data-ve-fe-toolbar', '1');
         editorToolbar.style.display = 'flex';
         editorToolbar.style.alignItems = 'center';
         editorToolbar.style.gap = '8px';
@@ -2787,6 +2805,14 @@
         changesTabs.style.gap = '6px';
         changesTabs.style.alignItems = 'center';
 
+        const btnFiles = document.createElement('button');
+        btnFiles.type = 'button';
+        btnFiles.className = 've-iconbtn';
+        btnFiles.textContent = 'Files';
+        btnFiles.title = 'Show changed files';
+        btnFiles.style.minWidth = '56px';
+        btnFiles.style.padding = '6px 10px';
+
         const mkTabBtn = (label) => {
           const b = document.createElement('button');
           b.type = 'button';
@@ -2794,11 +2820,24 @@
           b.textContent = label;
           b.style.minWidth = '72px';
           b.style.padding = '6px 10px';
+          // Keep consistent typography; toolbar CSS also enforces this with !important.
+          b.style.fontSize = '13px';
+          b.style.lineHeight = '1.4';
           return b;
         };
         const btnTabCurrent = mkTabBtn('Current');
         const btnTabOriginal = mkTabBtn('Original');
         const btnTabDiff = mkTabBtn('Diff');
+        // On mobile, keep the controls compact (but keep full labels).
+        try {
+          if (isMobile()) {
+            btnTabCurrent.style.minWidth = '64px';
+            btnTabOriginal.style.minWidth = '72px';
+            btnTabDiff.style.minWidth = '56px';
+          }
+        } catch {}
+
+        changesTabs.appendChild(btnFiles);
         changesTabs.appendChild(btnTabCurrent);
         changesTabs.appendChild(btnTabOriginal);
         changesTabs.appendChild(btnTabDiff);
@@ -2846,7 +2885,45 @@
           // Edit mode: editor occupies whole window (keep header).
           const isChanges = fe.mode === 'changes';
           const isEdit = !!fe.editMode;
-          try { sidebar.style.display = (isEdit && !isChanges) ? 'none' : 'flex'; } catch {}
+          // Changes mode on mobile: treat file list as an overlay screen.
+          const mobileChanges = isChanges && isMobile();
+
+          try {
+            if (mobileChanges) {
+              sidebar.style.display = fe.changesShowFileList ? 'flex' : 'none';
+            } else {
+              sidebar.style.display = (isEdit && !isChanges) ? 'none' : 'flex';
+            }
+          } catch {}
+
+          try {
+            if (mobileChanges) {
+              // Fullscreen overlay list inside the window.
+              sidebar.style.position = 'absolute';
+              sidebar.style.left = '0';
+              sidebar.style.top = '0';
+              sidebar.style.right = '0';
+              sidebar.style.bottom = '0';
+              sidebar.style.width = '100%';
+              sidebar.style.maxWidth = 'none';
+              sidebar.style.minWidth = '0';
+              sidebar.style.borderRight = 'none';
+              sidebar.style.zIndex = '5';
+              sidebar.style.boxShadow = '0 10px 26px rgba(0,0,0,0.10)';
+
+              editorWrap.style.display = fe.changesShowFileList ? 'none' : 'flex';
+            } else {
+              // Restore normal layout.
+              sidebar.style.position = '';
+              sidebar.style.left = '';
+              sidebar.style.top = '';
+              sidebar.style.right = '';
+              sidebar.style.bottom = '';
+              sidebar.style.zIndex = '';
+              sidebar.style.boxShadow = '';
+              editorWrap.style.display = 'flex';
+            }
+          } catch {}
           try { topRow.style.display = (isChanges || isEdit) ? 'none' : 'flex'; } catch {}
           try {
             editorHost.style.margin = isEdit ? '0' : '8px 8px 10px 8px';
@@ -2865,6 +2942,15 @@
           btnSave.disabled = !fe.editMode || !fe.currentPath;
           changesTabs.style.display = isChanges ? 'flex' : 'none';
 
+          // Mobile changes: default to viewer; file list via Files button.
+          if (isChanges && isMobile()) {
+            btnFiles.style.display = 'inline-flex';
+            btnFiles.textContent = fe.changesShowFileList ? 'Back' : 'Files';
+            btnFiles.title = fe.changesShowFileList ? 'Back to viewer' : 'Show changed files';
+          } else {
+            btnFiles.style.display = isChanges ? 'none' : 'none';
+          }
+
           // Textarea fallback
           try { editor.readOnly = !!fe.viewOnly; } catch {}
 
@@ -2873,9 +2959,18 @@
             editor.style.display = 'block';
             editorHost.style.display = 'none';
             diffHost.style.display = 'none';
+
+            // If Monaco isn't available, Diff isn't available. Hide it to avoid confusion.
+            try { if (isChanges && fe.btnTabDiffEl) fe.btnTabDiffEl.style.display = 'none'; } catch {}
+            try { if (isChanges && fe.btnTabOriginalEl) fe.btnTabOriginalEl.style.display = 'inline-flex'; } catch {}
+            try { if (isChanges && fe.btnTabCurrentEl) fe.btnTabCurrentEl.style.display = 'inline-flex'; } catch {}
+
             applyEditorLayoutState();
             return;
           }
+
+          // Monaco available: ensure Diff tab is visible.
+          try { if (isChanges && fe.btnTabDiffEl) fe.btnTabDiffEl.style.display = 'inline-flex'; } catch {}
 
           editor.style.display = 'none';
           if (isChanges && fe.changesTab === 'diff') {
@@ -3166,6 +3261,7 @@
         fe.btnTabCurrentEl = btnTabCurrent;
         fe.btnTabOriginalEl = btnTabOriginal;
         fe.btnTabDiffEl = btnTabDiff;
+        fe.btnFilesEl = btnFiles;
         fe.pathInputEl = pathInput;
         fe.statusEl = status;
 
@@ -3189,7 +3285,10 @@
         fe.mode = mode === 'changes' ? 'changes' : 'explorer';
         fe.editMode = false;
         fe.viewOnly = true;
-        fe.changesTab = 'current';
+        // Default to Diff when entering Changes (best for review).
+        fe.changesTab = 'diff';
+        // Mobile: show the list first (the viewer is useless until a file is picked).
+        fe.changesShowFileList = (fe.mode === 'changes' && isMobile()) ? true : false;
         try {
           if (fe.titleEl) fe.titleEl.textContent = fe.mode === 'changes' ? 'Changes' : 'File Explorer';
         } catch {}
@@ -3235,6 +3334,10 @@
           text.style.whiteSpace = 'nowrap';
           text.style.overflow = 'hidden';
           text.style.textOverflow = 'ellipsis';
+          // Desktop: allow sidebar to shrink-to-fit based on content measurement.
+          // (Span defaults can still measure as full width in some browsers if it can shrink.)
+          text.style.display = 'inline-block';
+          text.style.maxWidth = '100%';
           row.appendChild(text);
           ul.appendChild(row);
         };
@@ -3305,7 +3408,22 @@
           fe.btnTabCurrentEl.addEventListener('click', () => setChangesTabActive('current'));
           fe.btnTabOriginalEl.addEventListener('click', () => setChangesTabActive('original'));
           fe.btnTabDiffEl.addEventListener('click', () => setChangesTabActive('diff'));
+          if (fe.btnFilesEl) {
+            fe.btnFilesEl.setAttribute('data-wired', '1');
+            fe.btnFilesEl.addEventListener('click', () => {
+              const fe2 = ensureFileExplorerWindow();
+              fe2.changesShowFileList = !fe2.changesShowFileList;
+              try { if (typeof fe2._applyEditorMode === 'function') fe2._applyEditorMode(); } catch {}
+            });
+          }
         }
+
+        // On mobile, when selecting a file from the overlay list, return to viewer.
+        try {
+          if (isMobile()) {
+            fe.changesShowFileList = false;
+          }
+        } catch {}
         setChangesTabActive(fe.changesTab || 'current');
 
         // Load both current and original.
@@ -3337,7 +3455,7 @@
                 wordWrap: 'on',
                 fontSize: isMobile() ? 12 : 13,
                 fontFamily:
-                  'ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace',
+                  'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
               });
             }
             if (!fe.monacoDiffEditor) {
@@ -3348,6 +3466,9 @@
                 automaticLayout: false,
                 readOnly: true,
                 renderSideBySide: false,
+                fontSize: isMobile() ? 12 : 13,
+                fontFamily:
+                  'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
               });
             }
 
@@ -3586,7 +3707,7 @@
                   // iOS: render smaller, keep inputarea at 16px via CSS to avoid zoom.
                   fontSize: isMobile() ? 12 : 13,
                   fontFamily:
-                    'ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace',
+                    'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
                 });
               }
               if (!fe.monacoDiffEditor) {
@@ -3597,6 +3718,9 @@
                   automaticLayout: false,
                   readOnly: !!fe.viewOnly,
                   renderSideBySide: true,
+                  fontSize: isMobile() ? 12 : 13,
+                  fontFamily:
+                    'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
                 });
                 try {
                   const me = fe.monacoDiffEditor.getModifiedEditor();
@@ -3718,7 +3842,7 @@
                 wordWrap: 'on',
                 fontSize: isMobile() ? 12 : 13,
                 fontFamily:
-                  'ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace',
+                  'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
               });
             }
             if (!fe.monacoDiffEditor) {
@@ -3729,6 +3853,9 @@
                 automaticLayout: false,
                 readOnly: false,
                 renderSideBySide: true,
+                fontSize: isMobile() ? 12 : 13,
+                fontFamily:
+                  'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
               });
             }
 
@@ -6358,8 +6485,8 @@
         const so = serverOpts || {};
         const host = so.host || '0.0.0.0';
         const port = so.port || 9004;
-        const certPath = resolveFile(so.certPath || 'zdte_cert.crt');
-        const keyPath = resolveFile(so.keyPath || 'zdte_key.key');
+        const certPath = resolveFile(so.certPath || 'bobthe_server.crt');
+        const keyPath = resolveFile(so.keyPath || 'bobthe_sever.key');
         const tls = {
           cert: fs.readFileSync(certPath),
           key: fs.readFileSync(keyPath),
@@ -6452,8 +6579,8 @@
     //   VIIB_ETCH_UI_HOST=0.0.0.0
     //   VIIB_ETCH_UI_PORT=9004
     //   VIIB_ETCH_UI_HTTP=1   (force http)
-    //   VIIB_ETCH_UI_CERT=zdte_cert.crt
-    //   VIIB_ETCH_UI_KEY=zdte_key.key
+    //   VIIB_ETCH_UI_CERT=bobthe_server.crt
+    //   VIIB_ETCH_UI_KEY=bobthe_sever.key
     if (require.main === module) {
       const cmd = process.argv[2];
       if (cmd === 'web') {
@@ -6466,8 +6593,8 @@
         const portFromEnv = portRaw ? Number(portRaw) : undefined;
         const port = portFromArg || portFromEnv || undefined;
         const forceHttp = String(process.env.VIIB_ETCH_UI_HTTP || '').toLowerCase() === '1';
-        const certPath = process.env.VIIB_ETCH_UI_CERT || 'zdte_cert.crt';
-        const keyPath = process.env.VIIB_ETCH_UI_KEY || 'zdte_key.key';
+        const certPath = process.env.VIIB_ETCH_UI_CERT || 'bobthe_server.crt';
+        const keyPath = process.env.VIIB_ETCH_UI_KEY || 'bobthe_sever.key';
 
         const ui = createViibEtchUI({ token, tokensFile });
         // Enforce auth for CLI: require at least one token from env or file.
