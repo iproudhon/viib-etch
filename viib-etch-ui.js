@@ -158,13 +158,107 @@
               }
             } catch {}
           }
-          const text = await res.text().catch(() => '');
-          const msg = text || `${res.status} ${res.statusText}`;
-          throw new Error(msg);
+
+          // Prefer structured errors: { error: { message, requestId } }
+          let msg = '';
+          let reqId = '';
+          try {
+            const ct = res.headers.get('content-type') || '';
+            if (ct.includes('application/json')) {
+              const j = await res.json();
+              const e = j && j.error ? j.error : null;
+              if (e && typeof e === 'object') {
+                msg = e.message ? String(e.message) : '';
+                reqId = e.requestId ? String(e.requestId) : '';
+              } else if (typeof j?.error === 'string') {
+                msg = String(j.error);
+              } else if (j?.message) {
+                msg = String(j.message);
+              }
+            } else {
+              const text = await res.text().catch(() => '');
+              msg = String(text || '');
+            }
+          } catch {
+            // ignore
+          }
+
+          if (!reqId) {
+            try { reqId = String(res.headers.get('x-request-id') || ''); } catch {}
+          }
+          if (!msg) msg = `${res.status} ${res.statusText}`;
+
+          const err = new Error(reqId ? `${msg} (requestId: ${reqId})` : msg);
+          err.status = res.status;
+          err.requestId = reqId || undefined;
+          throw err;
         }
         const ct = res.headers.get('content-type') || '';
         if (ct.includes('application/json')) return await res.json();
         return await res.text();
+      };
+
+      const setGlobalError = (message, meta) => {
+        try {
+          const msg = String(message || '').trim();
+          if (!msg) return;
+          state.globalError = {
+            message: msg,
+            requestId: meta && meta.requestId ? String(meta.requestId) : null,
+            ts: nowIso(),
+          };
+          renderGlobalError();
+        } catch {}
+      };
+
+      const clearGlobalError = () => {
+        try {
+          state.globalError = null;
+          renderGlobalError();
+        } catch {}
+      };
+
+      const renderGlobalError = () => {
+        try {
+          let el = root.querySelector('[data-ve-global-error="1"]');
+          if (!state.globalError) {
+            if (el && el.parentNode) el.parentNode.removeChild(el);
+            return;
+          }
+          if (!el) {
+            el = document.createElement('div');
+            el.setAttribute('data-ve-global-error', '1');
+            el.style.cssText = [
+              'position:sticky',
+              'top:0',
+              'z-index:20',
+              'margin:0',
+              'padding:8px 12px',
+              'border-bottom:1px solid rgba(220,38,38,0.25)',
+              'background:rgba(254,242,242,0.98)',
+              'color:#991b1b',
+              'display:flex',
+              'align-items:center',
+              'justify-content:space-between',
+              'gap:10px',
+              'font-size:12px',
+            ].join(';');
+            // Insert above the top bar.
+            root.insertBefore(el, root.firstChild);
+          }
+          const reqId = state.globalError.requestId ? ` (requestId: ${escapeHtml(state.globalError.requestId)})` : '';
+          el.innerHTML = `
+            <div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+              <strong style="font-weight:600;">Error</strong>
+              <span class="ve-muted" style="opacity:0.95;">${escapeHtml(state.globalError.message)}${reqId}</span>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <button type="button" class="ve-iconbtn" data-ve-dismiss="1" style="padding:4px 8px;min-width:0;">Dismiss</button>
+            </div>
+          `;
+          const btn = el.querySelector('[data-ve-dismiss="1"]');
+          if (btn) btn.onclick = () => clearGlobalError();
+        } catch {}
       };
 
       const renderMarkdownViaServer = async (md) => {
@@ -176,7 +270,9 @@
             body: JSON.stringify({ markdown: String(md || '') }),
           });
           return String(html || '');
-        } catch {
+        } catch (e) {
+          // Don't spam UI for markdown errors, but do log for debugging.
+          try { console.error('markdown render failed', e); } catch {}
           return null;
         }
       };
@@ -3802,7 +3898,13 @@
         autoResizeTextarea(pane);
 
         if (!pane.loaded || forceReload) {
-          pane.chat = await apiFetch(`/chat/${encodeURIComponent(id)}`);
+          try {
+            pane.chat = await apiFetch(`/chat/${encodeURIComponent(id)}`);
+          } catch (e) {
+            console.error('openChatId failed', e);
+            setGlobalError(String(e && e.message ? e.message : e), { requestId: e && e.requestId ? String(e.requestId) : null });
+            throw e;
+          }
           pane.loaded = true;
           pane.live = createLiveState();
           state.chat = pane.chat;
@@ -3847,11 +3949,18 @@
         // New chat should inherit model + base_dir from the currently selected chat, if any.
         const model_name = (state.chat && state.chat.model_name) ? String(state.chat.model_name) : getSelectedModel();
         const base_dir = (state.chat && state.chat.base_dir) ? String(state.chat.base_dir) : null;
-        const res = await apiFetch('/chat', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(Object.assign({ model_name }, base_dir ? { base_dir } : {})),
-        });
+        let res;
+        try {
+          res = await apiFetch('/chat', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(Object.assign({ model_name }, base_dir ? { base_dir } : {})),
+          });
+        } catch (e) {
+          console.error('createNewChat failed', e);
+          setGlobalError(String(e && e.message ? e.message : e), { requestId: e && e.requestId ? String(e.requestId) : null });
+          throw e;
+        }
         await refreshChats();
         if (res && res.id) await openChatId(res.id);
       };
@@ -4205,6 +4314,13 @@
           setRunning(pane, false);
           stopThinking(pane);
           console.error('run.error', e && e.data);
+          try {
+            const data = e && e.data ? JSON.parse(e.data) : null;
+            const msg = data && data.error ? String(data.error) : (e && e.data ? String(e.data) : 'run.error');
+            setGlobalError(msg);
+          } catch {
+            try { setGlobalError(e && e.data ? String(e.data) : 'run.error'); } catch {}
+          }
           const id = String(pane.chatId || '');
           if (id) {
             const st = getOrInitChatStatus(id);
@@ -4213,6 +4329,22 @@
           }
           if (String(state.chatId || '') !== String(pane.chatId || '')) {
             closeSSE(pane);
+          }
+        });
+
+        // Server-side errors (API handler / background work). Show them in UI.
+        ev.addEventListener('server.error', (e) => {
+          if (!liveCheckAndUpdateSeq(e)) return;
+          try {
+            const data = JSON.parse(e.data || '{}');
+            const msg = data && data.message ? String(data.message) : 'server error';
+            const requestId = data && data.requestId ? String(data.requestId) : null;
+            // Always log details to browser console.
+            console.error('server.error', data);
+            setGlobalError(msg, { requestId });
+          } catch (err) {
+            console.error('server.error (parse failed)', err);
+            setGlobalError('server error');
           }
         });
 
@@ -4323,7 +4455,8 @@
           }
         } catch (e) {
           setRunning(pane, false);
-          alert(String(e && e.message ? e.message : e));
+          console.error('sendMessage failed', e);
+          setGlobalError(String(e && e.message ? e.message : e), { requestId: e && e.requestId ? String(e.requestId) : null });
         }
       };
 
@@ -4651,6 +4784,71 @@
       res.end(body || '');
     }
 
+    function genRequestId() {
+      // Short, readable id to correlate server logs with UI errors.
+      return `${Date.now().toString(36)}_${Math.random().toString(16).slice(2, 10)}`;
+    }
+
+    function safeStringifyError(err) {
+      try {
+        if (!err) return '';
+        if (typeof err === 'string') return err;
+        if (err.stack) return String(err.stack);
+        if (err.message) return String(err.message);
+        return JSON.stringify(err);
+      } catch {
+        try { return String(err); } catch { return 'unknown error'; }
+      }
+    }
+
+    function isDevLike() {
+      const env = String(process.env.NODE_ENV || '').toLowerCase();
+      // Default to dev-like when NODE_ENV is unset (common for this CLI-style server).
+      return !env || env === 'development' || env === 'dev';
+    }
+
+    function sendApiError(req, res, code, err, ctx) {
+      const requestId = (ctx && ctx.requestId) ? String(ctx.requestId) : genRequestId();
+      const where = (ctx && ctx.where) ? String(ctx.where) : 'request';
+      const chatId = (ctx && ctx.chatId) ? String(ctx.chatId) : null;
+
+      const errText = safeStringifyError(err);
+      // Always log full error to server console.
+      console.error(`[viib-etch-ui] ${where} error requestId=${requestId}${chatId ? ` chatId=${chatId}` : ''}:`, errText);
+
+      // Emit to SSE so active UI can show it.
+      try {
+        if (chatId) {
+          emit(chatId, 'server.error', {
+            ts: nowIso(),
+            requestId,
+            where,
+            code: code || 500,
+            message: (err && err.message) ? String(err.message) : 'internal_error',
+            // Only include stack/details in dev.
+            details: isDevLike() ? errText : undefined,
+          });
+        }
+      } catch {}
+
+      // Send safe response to client.
+      const msg = (err && err.message) ? String(err.message) : 'internal_error';
+      const payload = {
+        error: {
+          message: isDevLike() ? msg : 'internal_error',
+          requestId,
+        },
+      };
+      try {
+        if (!res.writableEnded && !res.destroyed) {
+          json(res, code || 500, payload);
+        }
+      } catch {
+        // ignore
+      }
+      return requestId;
+    }
+
     function readBody(req, limitBytes) {
       const limit = typeof limitBytes === 'number' ? limitBytes : 1024 * 1024;
       return new Promise((resolve, reject) => {
@@ -4884,7 +5082,8 @@
         if (!pathname.startsWith(apiBase + '/')) return false;
 
         if (!checkAuth(req, query)) {
-          json(res, 401, { error: 'unauthorized' });
+          // Keep auth errors simple/consistent.
+          json(res, 401, { error: { message: 'unauthorized' } });
           return true;
         }
 
@@ -4899,7 +5098,7 @@
               system_prompt_file: m.system_prompt_file || null,
             })));
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'GET /models' });
           }
           return true;
         }
@@ -4910,7 +5109,7 @@
             const sessions = ChatSession.listChatSessions();
             json(res, 200, sessions);
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'GET /chats' });
           }
           return true;
         }
@@ -4921,7 +5120,7 @@
             const body = await readJson(req);
             const model_name = body.model_name;
             if (typeof model_name !== 'string' || !model_name.trim()) {
-              json(res, 400, { error: 'model_name is required' });
+              json(res, 400, { error: { message: 'model_name is required' } });
               return true;
             }
             const llm = ChatLLM.newChatSession(model_name, true, null, {});
@@ -4932,7 +5131,7 @@
             }
             json(res, 200, { id: llm.chat.id });
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'POST /chat' });
           }
           return true;
         }
@@ -4944,12 +5143,12 @@
           try {
             const chat = ChatSession.load(chatId);
             if (!chat) {
-              json(res, 404, { error: 'not found' });
+              json(res, 404, { error: { message: 'not found' } });
               return true;
             }
             json(res, 200, chat);
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'GET /chat/:id', chatId });
           }
           return true;
         }
@@ -4965,12 +5164,12 @@
             const tool_name = body && body.tool_name ? String(body.tool_name) : '';
             const argsIn = body && body.arguments && typeof body.arguments === 'object' ? body.arguments : {};
             if (!tool_name) {
-              json(res, 400, { error: 'tool_name is required' });
+              json(res, 400, { error: { message: 'tool_name is required' } });
               return true;
             }
             const chat = ChatSession.load(chatId);
             if (!chat) {
-              json(res, 404, { error: 'not found' });
+              json(res, 404, { error: { message: 'not found' } });
               return true;
             }
 
@@ -5008,7 +5207,7 @@
             }
             json(res, 200, result);
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'POST /chat/:id/tool', chatId });
           }
           return true;
         }
@@ -5022,7 +5221,7 @@
           try {
             const chat = ChatSession.load(chatId);
             if (!chat) {
-              json(res, 404, { error: 'not found' });
+              json(res, 404, { error: { message: 'not found' } });
               return true;
             }
             const base_dir =
@@ -5074,7 +5273,7 @@
             files.sort((a, b) => a.localeCompare(b));
             json(res, 200, { base_dir: base_dir || '', files });
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'GET /chat/:id/changes', chatId });
           }
           return true;
         }
@@ -5087,13 +5286,13 @@
           const chatId = decodeURIComponent(originalMatch[1]);
           const reqPath = query && typeof query.path === 'string' ? String(query.path) : '';
           if (!reqPath.trim()) {
-            json(res, 400, { error: 'path is required' });
+            json(res, 400, { error: { message: 'path is required' } });
             return true;
           }
           try {
             const chat = ChatSession.load(chatId);
             if (!chat) {
-              json(res, 404, { error: 'not found' });
+              json(res, 404, { error: { message: 'not found' } });
               return true;
             }
             const base_dir =
@@ -5108,7 +5307,7 @@
             if (baseAbs) {
               const prefix = baseAbs.endsWith(path.sep) ? baseAbs : (baseAbs + path.sep);
               if (!(targetAbs === baseAbs || targetAbs.startsWith(prefix))) {
-                json(res, 403, { error: 'path outside base_dir' });
+                json(res, 403, { error: { message: 'path outside base_dir' } });
                 return true;
               }
             }
@@ -5137,12 +5336,12 @@
               }
             }
             if (!lookupKey || !(lookupKey in fo)) {
-              json(res, 404, { error: 'original not found' });
+              json(res, 404, { error: { message: 'original not found' } });
               return true;
             }
             text(res, 200, String(fo[lookupKey] ?? ''), 'text/plain');
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'GET /chat/:id/original', chatId });
           }
           return true;
         }
@@ -5155,13 +5354,13 @@
           const chatId = decodeURIComponent(fileMatch[1]);
           const reqPath = query && typeof query.path === 'string' ? String(query.path) : '';
           if (!reqPath.trim()) {
-            json(res, 400, { error: 'path is required' });
+            json(res, 400, { error: { message: 'path is required' } });
             return true;
           }
           try {
             const chat = ChatSession.load(chatId);
             if (!chat) {
-              json(res, 404, { error: 'not found' });
+              json(res, 404, { error: { message: 'not found' } });
               return true;
             }
 
@@ -5177,7 +5376,7 @@
             if (baseAbs) {
               const prefix = baseAbs.endsWith(path.sep) ? baseAbs : (baseAbs + path.sep);
               if (!(targetAbs === baseAbs || targetAbs.startsWith(prefix))) {
-                json(res, 403, { error: 'path outside base_dir' });
+                json(res, 403, { error: { message: 'path outside base_dir' } });
                 return true;
               }
             }
@@ -5185,18 +5384,18 @@
             let st;
             try { st = fs.statSync(targetAbs); } catch { st = null; }
             if (!st) {
-              json(res, 404, { error: 'file not found' });
+              json(res, 404, { error: { message: 'file not found' } });
               return true;
             }
             if (!st.isFile()) {
-              json(res, 400, { error: 'not a file' });
+              json(res, 400, { error: { message: 'not a file' } });
               return true;
             }
 
             const content = fs.readFileSync(targetAbs, 'utf8');
             text(res, 200, content || '', 'text/plain');
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'GET /chat/:id/file', chatId });
           }
           return true;
         }
@@ -5209,13 +5408,13 @@
             const reqPath = body && typeof body.path === 'string' ? body.path : '';
             const content = body && body.content !== undefined ? String(body.content) : '';
             if (!String(reqPath || '').trim()) {
-              json(res, 400, { error: 'path is required' });
+              json(res, 400, { error: { message: 'path is required' } });
               return true;
             }
 
             const chat = ChatSession.load(chatId);
             if (!chat) {
-              json(res, 404, { error: 'not found' });
+              json(res, 404, { error: { message: 'not found' } });
               return true;
             }
 
@@ -5231,7 +5430,7 @@
             if (baseAbs) {
               const prefix = baseAbs.endsWith(path.sep) ? baseAbs : (baseAbs + path.sep);
               if (!(targetAbs === baseAbs || targetAbs.startsWith(prefix))) {
-                json(res, 403, { error: 'path outside base_dir' });
+                json(res, 403, { error: { message: 'path outside base_dir' } });
                 return true;
               }
             }
@@ -5241,7 +5440,7 @@
             fs.writeFileSync(targetAbs, content, 'utf8');
             json(res, 200, { success: true });
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'POST /chat/:id/file', chatId });
           }
           return true;
         }
@@ -5256,13 +5455,13 @@
           try {
             const chat = ChatSession.load(chatId);
             if (!chat) {
-              json(res, 404, { error: 'not found' });
+              json(res, 404, { error: { message: 'not found' } });
               return true;
             }
             const rec = (typeof chat.getImage === 'function') ? chat.getImage(imageId) : null;
             const b64 = rec ? (rec.data_b64 ?? rec.data_base64 ?? rec.b64_json ?? rec.data ?? null) : null;
             if (!rec || !b64) {
-              json(res, 404, { error: 'image not found' });
+              json(res, 404, { error: { message: 'image not found' } });
               return true;
             }
             const ct = rec.mime_type && typeof rec.mime_type === 'string' ? rec.mime_type : 'application/octet-stream';
@@ -5271,7 +5470,7 @@
             res.setHeader('cache-control', 'no-store');
             res.end(Buffer.from(String(b64), 'base64'));
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'GET /chat/:id/images/:imageId/data', chatId });
           }
           return true;
         }
@@ -5290,16 +5489,16 @@
               ? body.mime_type.trim()
               : 'application/octet-stream';
             if (typeof b64 !== 'string' || !b64.trim()) {
-              json(res, 400, { error: 'data_b64 is required' });
+              json(res, 400, { error: { message: 'data_b64 is required' } });
               return true;
             }
             const chat = ChatSession.load(chatId);
             if (!chat) {
-              json(res, 404, { error: 'not found' });
+              json(res, 404, { error: { message: 'not found' } });
               return true;
             }
             if (typeof chat.addImage !== 'function') {
-              json(res, 500, { error: 'chat does not support images' });
+              json(res, 500, { error: { message: 'chat does not support images' } });
               return true;
             }
             const rec = {
@@ -5313,7 +5512,7 @@
             try { chat.save(); } catch {}
             json(res, 200, { id });
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'POST /chat/:id/images', chatId });
           }
           return true;
         }
@@ -5328,7 +5527,7 @@
             const body = await readJson(req);
             const urlStr = body && typeof body.url === 'string' ? body.url.trim() : '';
             if (!urlStr) {
-              json(res, 400, { error: 'url is required' });
+              json(res, 400, { error: { message: 'url is required' } });
               return true;
             }
 
@@ -5342,13 +5541,13 @@
             const body = await readJson(req);
             const chat = ChatSession.load(chatId);
             if (!chat) {
-              json(res, 404, { error: 'not found' });
+              json(res, 404, { error: { message: 'not found' } });
               return true;
             }
             const mt = (typeof body.mime_type === 'string' && body.mime_type.trim()) ? body.mime_type.trim() : 'application/octet-stream';
             const b64 = (typeof body.data_b64 === 'string' && body.data_b64.trim()) ? body.data_b64.trim() : '';
             if (!b64) {
-              json(res, 400, { error: 'data_b64 is required' });
+              json(res, 400, { error: { message: 'data_b64 is required' } });
               return true;
             }
             const rec = {
@@ -5362,7 +5561,7 @@
             chat.save();
             json(res, 200, { id });
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'POST /chat/:id/images/from_url', chatId });
           }
           return true;
         }
@@ -5372,7 +5571,7 @@
               return true;
             }
             if (typeof chat.addImage !== 'function') {
-              json(res, 500, { error: 'chat does not support images' });
+              json(res, 500, { error: { message: 'chat does not support images' } });
               return true;
             }
 
@@ -5444,7 +5643,7 @@
             }
 
             if (!data_b64) {
-              json(res, 500, { error: 'failed to fetch image' });
+              json(res, 500, { error: { message: 'failed to fetch image' } });
               return true;
             }
             const rec = {
@@ -5459,7 +5658,7 @@
             try { chat.save(); } catch {}
             json(res, 200, { id });
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'POST /chat/:id/audio', chatId });
           }
           return true;
         }
@@ -5470,12 +5669,12 @@
           try {
             const existing = runByChatId.get(String(chatId));
             if (existing && existing.running) {
-              json(res, 409, { error: 'chat is running' });
+              json(res, 409, { error: { message: 'chat is running' } });
               return true;
             }
             const chat = ChatSession.load(chatId);
             if (!chat) {
-              json(res, 404, { error: 'not found' });
+              json(res, 404, { error: { message: 'not found' } });
               return true;
             }
             const filePath = path.resolve(ChatSession.getFileName(chatId));
@@ -5488,7 +5687,7 @@
             busByChatId.delete(String(chatId));
             json(res, 200, { success: true });
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'DELETE /chat/:id', chatId });
           }
           return true;
         }
@@ -5585,7 +5784,7 @@
             const body = await readJson(req);
             const chat = ChatSession.load(chatId);
             if (!chat) {
-              json(res, 404, { error: 'not found' });
+              json(res, 404, { error: { message: 'not found' } });
               return true;
             }
             const base_dir =
@@ -5600,7 +5799,7 @@
             }
             json(res, 200, { success: true, base_dir: chat.base_dir });
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'POST /chat/:id/base_dir', chatId });
           }
           return true;
         }
@@ -5615,7 +5814,7 @@
             const body = await readJson(req);
             const chat = ChatSession.load(chatId);
             if (!chat) {
-              json(res, 404, { error: 'not found' });
+              json(res, 404, { error: { message: 'not found' } });
               return true;
             }
             const raw = body.title;
@@ -5624,7 +5823,7 @@
             chat.save();
             json(res, 200, { success: true, title: chat.title });
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'POST /chat/:id/title', chatId });
           }
           return true;
         }
@@ -5639,19 +5838,19 @@
             const body = await readJson(req);
             const message = body.message;
             if (typeof message !== 'string' || !message.trim()) {
-              json(res, 400, { error: 'message is required' });
+              json(res, 400, { error: { message: 'message is required' } });
               return true;
             }
 
             const existing = runByChatId.get(String(chatId));
             if (existing && existing.running) {
-              json(res, 409, { error: 'chat is already running' });
+              json(res, 409, { error: { message: 'chat is already running' } });
               return true;
             }
 
             const chat = ChatSession.load(chatId);
             if (!chat) {
-              json(res, 404, { error: 'not found' });
+              json(res, 404, { error: { message: 'not found' } });
               return true;
             }
 
@@ -5852,6 +6051,8 @@
                 emit(chatId, 'chat.refresh', { ts: nowIso() });
                 emit(chatId, 'run.done', { ts: nowIso() });
               } catch (e) {
+                // Make sure errors are visible in server console and in UI.
+                sendApiError(req, { writableEnded: true, destroyed: false }, 500, e, { where: 'chat run (async)', chatId });
                 emit(chatId, 'run.error', { ts: nowIso(), error: e.message || String(e) });
               } finally {
                 const r = runByChatId.get(String(chatId));
@@ -5861,7 +6062,7 @@
 
             json(res, 200, { success: true });
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'POST /chat/:id/send', chatId });
           }
           return true;
         }
@@ -5880,19 +6081,19 @@
             const body = await readJson(req);
             const prompt = body.prompt;
             if (typeof prompt !== 'string' || !prompt.trim()) {
-              json(res, 400, { error: 'prompt is required' });
+              json(res, 400, { error: { message: 'prompt is required' } });
               return true;
             }
 
             const existing = runByChatId.get(String(chatId));
             if (existing && existing.running) {
-              json(res, 409, { error: 'chat is already running' });
+              json(res, 409, { error: { message: 'chat is already running' } });
               return true;
             }
 
             const chat = ChatSession.load(chatId);
             if (!chat) {
-              json(res, 404, { error: 'not found' });
+              json(res, 404, { error: { message: 'not found' } });
               return true;
             }
 
@@ -5975,13 +6176,13 @@
               json(res, 200, { success: true, result });
             } catch (e) {
               emit(chatId, 'run.error', { ts: nowIso(), error: e.message || String(e) });
-              json(res, 500, { error: e.message || String(e) });
+              sendApiError(req, res, 500, e, { where: 'POST /chat/:id/generate_video', chatId });
             } finally {
               const r = runByChatId.get(String(chatId));
               if (r) r.running = false;
             }
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'POST /chat/:id/generate_video', chatId });
           }
           return true;
         }
@@ -5996,19 +6197,19 @@
             const body = await readJson(req);
             const prompt = body.prompt;
             if (typeof prompt !== 'string' || !prompt.trim()) {
-              json(res, 400, { error: 'prompt is required' });
+              json(res, 400, { error: { message: 'prompt is required' } });
               return true;
             }
 
             const existing = runByChatId.get(String(chatId));
             if (existing && existing.running) {
-              json(res, 409, { error: 'chat is already running' });
+              json(res, 409, { error: { message: 'chat is already running' } });
               return true;
             }
 
             const chat = ChatSession.load(chatId);
             if (!chat) {
-              json(res, 404, { error: 'not found' });
+              json(res, 404, { error: { message: 'not found' } });
               return true;
             }
 
@@ -6095,13 +6296,13 @@
               json(res, 200, { success: true, result });
             } catch (e) {
               emit(chatId, 'run.error', { ts: nowIso(), error: e.message || String(e) });
-              json(res, 500, { error: e.message || String(e) });
+              sendApiError(req, res, 500, e, { where: 'POST /chat/:id/generate_image', chatId });
             } finally {
               const r = runByChatId.get(String(chatId));
               if (r) r.running = false;
             }
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'POST /chat/:id/generate_image', chatId });
           }
           return true;
         }
@@ -6118,12 +6319,12 @@
             const html = md.render(markdown);
             return text(res, 200, html, 'text/html');
           } catch (e) {
-            json(res, 500, { error: e.message || String(e) });
+            sendApiError(req, res, 500, e, { where: 'POST /markdown' });
           }
           return true;
         }
 
-        json(res, 404, { error: 'not found' });
+        json(res, 404, { error: { message: 'not found' } });
         return true;
       }
 
@@ -6164,14 +6365,17 @@
           key: fs.readFileSync(keyPath),
         };
         const server = https.createServer(tls, (req, res) => {
+          // Correlation id for *any* request (UI, API, SSE, static).
+          // Exposed in responses so the browser can show it.
+          const requestId = genRequestId();
+          try { res.setHeader('x-request-id', requestId); } catch {}
           const safeWrite = (fn) => {
             if (res.writableEnded || res.destroyed || res.headersSent) return;
             fn();
           };
           const safeNotFound = () => safeWrite(() => text(res, 404, 'not found'));
           const safeError = (err) => {
-            console.error('[viib-etch-ui] request error:', err && (err.stack || err.message || err));
-            safeWrite(() => json(res, 500, { error: 'internal_error' }));
+            sendApiError(req, res, 500, err, { where: 'https server handler', requestId });
           };
 
           try {
@@ -6197,14 +6401,15 @@
         const host = so.host || '0.0.0.0';
         const port = so.port || 8080;
         const server = http.createServer((req, res) => {
+          const requestId = genRequestId();
+          try { res.setHeader('x-request-id', requestId); } catch {}
           const safeWrite = (fn) => {
             if (res.writableEnded || res.destroyed || res.headersSent) return;
             fn();
           };
           const safeNotFound = () => safeWrite(() => text(res, 404, 'not found'));
           const safeError = (err) => {
-            console.error('[viib-etch-ui] request error:', err && (err.stack || err.message || err));
-            safeWrite(() => json(res, 500, { error: 'internal_error' }));
+            sendApiError(req, res, 500, err, { where: 'http server handler', requestId });
           };
 
           try {
