@@ -59,6 +59,80 @@ async function testModelDefaultTools() {
   }
 }
 
+async function testAnthropicModelDetectionAndKeyEnv() {
+  console.log('\n=== Test: Anthropic (Claude) model detection + ANTHROPIC_API_KEY env ===');
+
+  const original = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'anthropic-test-key';
+
+  try {
+    const m1 = new ChatModel({
+      name: 'claude-test-1',
+      model: 'claude-3-5-sonnet-latest',
+      base_url: 'https://api.anthropic.com',
+      // no api_key provided -> should use env
+    });
+    if (!m1._isAnthropicModel || !m1._isAnthropicModel()) {
+      throw new Error('Expected _isAnthropicModel() to return true for claude-* model');
+    }
+    if (m1.api_key !== 'anthropic-test-key') {
+      throw new Error(`Expected api_key to come from ANTHROPIC_API_KEY, got: ${JSON.stringify(m1.api_key)}`);
+    }
+
+    const m2 = new ChatModel({
+      name: 'claude-test-2',
+      model: 'anthropic/claude-3-5-haiku-latest',
+      base_url: 'https://api.anthropic.com',
+    });
+    if (!m2._isAnthropicModel || !m2._isAnthropicModel()) {
+      throw new Error('Expected _isAnthropicModel() to return true for anthropic/claude-* model');
+    }
+    if (m2.api_key !== 'anthropic-test-key') {
+      throw new Error(`Expected api_key to come from ANTHROPIC_API_KEY, got: ${JSON.stringify(m2.api_key)}`);
+    }
+
+    console.log('  ✓ Claude model detection and env-key selection works');
+  } finally {
+    if (original === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = original;
+  }
+}
+
+async function testAnthropicToolConversion() {
+  console.log('\n=== Test: Anthropic tools conversion (OpenAI function tools -> Anthropic tools) ===');
+
+  const llm = ChatLLM.newChatSession('gpt-4.1-mini', false, null, {});
+  const tools = [
+    {
+      type: 'function',
+      function: {
+        name: 'calculator',
+        description: 'Evaluate a basic arithmetic expression.',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { expression: { type: 'string' } },
+          required: ['expression'],
+        },
+      },
+    },
+    { type: 'googleSearch' }, // should be ignored
+  ];
+
+  const converted = llm._toolsToAnthropicFormat(tools);
+  if (!Array.isArray(converted) || converted.length !== 1) {
+    throw new Error(`Expected exactly 1 converted tool, got: ${JSON.stringify(converted)}`);
+  }
+  const t = converted[0];
+  if (t.name !== 'calculator') {
+    throw new Error(`Expected tool name calculator, got: ${JSON.stringify(t.name)}`);
+  }
+  if (!t.input_schema || t.input_schema.type !== 'object') {
+    throw new Error(`Expected tool input_schema to be an object schema, got: ${JSON.stringify(t.input_schema)}`);
+  }
+  console.log('  ✓ Tool conversion produces valid Anthropic tool entries');
+}
+
 async function testLoadModels() {
   console.log('\n=== Test: Load Models ===');
   try {
@@ -646,6 +720,10 @@ async function runTests() {
   
   try {
     await testModelDefaultTools();
+
+    // Claude/Anthropic unit tests (no network)
+    await testAnthropicModelDetectionAndKeyEnv();
+    await testAnthropicToolConversion();
 
     // Test 1: Load models
     const models = await testLoadModels();

@@ -17,6 +17,7 @@
   "license": "SEE LICENSE IN LICENSE",
   "dependencies": {
     "@google/genai": "^1.38.0",
+    "@anthropic-ai/sdk": "^0.39.0",
     "markdown-it": "^14.1.0",
     "openai": "^6.15.0"
   },

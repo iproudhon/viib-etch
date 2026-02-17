@@ -37,6 +37,15 @@
         "reasoning_effort": "high"
     },
     {
+        "name": "claude-opus-4.6-coder",
+        "model": "claude-opus-4-6",
+        "baseUrl": "https://api.anthropic.com",
+        "api_key_file": "/data/sjung/src/viib-etch/.anthropic-api-key",
+        "system_prompt_file": "/data/sjung/src/viib-etch/viib-etch.system.coder.prompt",
+        "tools": ["bash", "text_editor", "web_search", "code_execution", "read_lints", "todo_write", "update_memory"],
+        "reasoning_effort": "high"
+    },
+    {
         "name": "gpt-5.2-coder",
         "model": "gpt-5.2",
         "baseUrl": "https://api.openai.com/v1",
@@ -118,6 +127,15 @@
             "get_option_chain",
             "get_positions"
         ],
+        "reasoning_effort": "high"
+    },
+    {
+        "name": "gemini-3-pro-preview-analyst",
+        "model": "gemini-3-pro-preview",
+        "baseUrl": "https://generativelanguage.googleapis.com",
+        "api_key_file": "/data/sjung/src/viib-etch/.google-api-key",
+        "system_prompt_file": "/data/sjung/src/viib-etch/viib-etch.system.coder.gemini.prompt",
+        "tools": ["run_terminal_cmd", "rg", "delete_file", "read_lints", "todo_write", "edit_file", "read_file", "list_dir", "glob_file_search", "update_memory", "googleSearch", "codeExecution", "get_quotes", "get_chart", "get_option_chain", "get_positions" ],
         "reasoning_effort": "high"
     },
     {

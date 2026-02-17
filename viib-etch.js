@@ -6,6 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { OpenAI } = require('openai');
 const { GoogleGenAI } = require('@google/genai');
+const { Anthropic } = require('@anthropic-ai/sdk');
 
 let modelsFileName = path.join(__dirname, 'viib-etch-models.json')
 let chatsDir = path.join(__dirname, 'chats')
@@ -74,7 +75,10 @@ class ChatModel {
     this.tools = Array.isArray(config.tools) ? config.tools : null;
     
     // Load API key - prioritize file if specified, then config, then env var
-    // For Gemini models, check GEMINI_API_KEY env var; otherwise use OPENAI_API_KEY
+    // Provider-specific env vars:
+    // - Gemini: GEMINI_API_KEY
+    // - Anthropic (Claude): ANTHROPIC_API_KEY
+    // - OpenAI-compatible: OPENAI_API_KEY
     if (this.api_key_file) {
       try {
         const keyPath = resolveConfigFile(this.api_key_file);
@@ -84,7 +88,11 @@ class ChatModel {
       }
     } else {
       const isGemini = this._isGeminiModel();
-      this.api_key = config.api_key || (isGemini ? process.env.GEMINI_API_KEY : process.env.OPENAI_API_KEY);
+      const isAnthropic = this._isAnthropicModel();
+      const envKey = isGemini
+        ? process.env.GEMINI_API_KEY
+        : (isAnthropic ? process.env.ANTHROPIC_API_KEY : process.env.OPENAI_API_KEY);
+      this.api_key = config.api_key || envKey;
     }
     
     if (!this.api_key) {
@@ -95,6 +103,12 @@ class ChatModel {
   _isGeminiModel() {
     const modelName = (this.model || '').toLowerCase();
     return modelName.includes('gemini') || modelName.includes('veo') || modelName.startsWith('google/');
+  }
+
+  _isAnthropicModel() {
+    const modelName = (this.model || '').toLowerCase();
+    // Accept either raw Claude model names ("claude-...") or namespaced ("anthropic/claude-...").
+    return modelName.includes('claude') || modelName.startsWith('anthropic/');
   }
 
   readSystemPromptFileFresh() {
@@ -621,12 +635,24 @@ class ChatLLM {
     return model._isGeminiModel();
   }
 
+  _isAnthropicModel() {
+    const model = this._ensureModelResolved();
+    return typeof model._isAnthropicModel === 'function' ? model._isAnthropicModel() : false;
+  }
+
   getClient() {
     const model = this._ensureModelResolved();
     if (!this._client) {
       if (model._isGeminiModel()) {
         this._client = new GoogleGenAI({
           apiKey: model.api_key
+        });
+      } else if (typeof model._isAnthropicModel === 'function' && model._isAnthropicModel()) {
+        this._client = new Anthropic({
+          apiKey: model.api_key,
+          // Anthropic SDK uses baseURL without the /v1 suffix.
+          // Many configs set baseUrl="https://api.anthropic.com/v1"; normalize it.
+          ...(model.base_url ? { baseURL: String(model.base_url).replace(/\/+v1\/?$/, '') } : {})
         });
       } else {
         this._client = new OpenAI({
@@ -1177,6 +1203,14 @@ class ChatLLM {
           : this._completeNoStreamGemini(params, requestOptions);
         return await p;
       }
+
+      // Route Anthropic (Claude) models
+      if (this._isAnthropicModel()) {
+        const p = stream
+          ? this._completeStreamAnthropic(params, requestOptions)
+          : this._completeNoStreamAnthropic(params, requestOptions);
+        return await p;
+      }
       
       const p = stream
         ? (useResponsesAPI
@@ -1194,6 +1228,482 @@ class ChatLLM {
       // Clear processes map but don't kill them (they may still be running)
       this._activeProcesses.clear();
     }
+
+    // NOTE: method end
+  }
+
+  // ------------------------
+  // Anthropic (Claude) API
+  // ------------------------
+
+  _coerceAnthropicModelId(modelId) {
+    // Allow model config values like "anthropic/claude-...".
+    const s = String(modelId || '').trim();
+    return s.toLowerCase().startsWith('anthropic/') ? s.slice('anthropic/'.length) : s;
+  }
+
+  _extractSystemPromptFromMessages(openAIMessages) {
+    if (!Array.isArray(openAIMessages) || openAIMessages.length === 0) return null;
+    const first = openAIMessages[0];
+    if (first && first.role === 'system') {
+      const content = (first.content === null || first.content === undefined) ? '' : String(first.content);
+      return content;
+    }
+    return null;
+  }
+
+  _toolsToAnthropicFormat(tools) {
+    // Convert tool definitions into Anthropic tools format.
+    // Handles both OpenAI-style function tools and Anthropic built-in tools.
+    if (!tools || !Array.isArray(tools)) return null;
+
+    // Anthropic built-in tools: resolve short names ("bash", "text_editor", etc.)
+    // to the versioned tool tags supported by the installed @anthropic-ai/sdk.
+    //
+    // We intentionally keep viib-etch-models.json free of versioned tags.
+    const ANTHROPIC_BUILTINS = {
+      bash: {
+        candidates: [{ type: 'bash_20250124', name: 'bash' }],
+      },
+      // NOTE: Anthropic's text editor tool uses a fixed tool name.
+      // The UI-facing concept is "text_editor", but the tool name must be "str_replace_editor".
+      text_editor: {
+        candidates: [
+          { type: 'text_editor_20250728', name: 'str_replace_editor' },
+          { type: 'text_editor_20250429', name: 'str_replace_editor' },
+          { type: 'text_editor_20250124', name: 'str_replace_editor' },
+        ],
+      },
+      web_search: {
+        candidates: [
+          { type: 'web_search_20250305', name: 'web_search' },
+        ],
+      },
+      // code_execution may not be supported by all SDK versions.
+      code_execution: {
+        candidates: [
+          { type: 'code_execution_20250522', name: 'code_execution' },
+        ],
+      },
+    };
+
+    const anthropicSupportedToolTypes = (() => {
+      try {
+        // The Anthropic SDK uses a schema that enumerates acceptable tool tags.
+        // We try to extract it to avoid sending unsupported tags.
+        const sdk = require('@anthropic-ai/sdk');
+        const zodSchemas = sdk && (sdk.zodSchemas || sdk._schemas || sdk.schemas);
+        const toolSchema = zodSchemas && (zodSchemas.Tool || zodSchemas.tool || zodSchemas.toolSchema);
+        const def = toolSchema && toolSchema._def;
+        const values = def && def.values;
+        if (Array.isArray(values) && values.length) {
+          return new Set(values.map(String));
+        }
+      } catch {}
+      return null;
+    })();
+
+    const resolveBuiltin = (shortName) => {
+      const entry = ANTHROPIC_BUILTINS[shortName];
+      if (!entry || !Array.isArray(entry.candidates)) return null;
+      for (const cand of entry.candidates) {
+        if (!cand || !cand.type) continue;
+        if (anthropicSupportedToolTypes && !anthropicSupportedToolTypes.has(String(cand.type))) continue;
+        return cand;
+      }
+      return entry.candidates[0] || null;
+    };
+
+    const out = [];
+    for (const t of tools) {
+      if (!t || typeof t !== 'object') continue;
+
+      // Check for Anthropic built-in tools (stored as { type: 'bash' } etc.)
+      const builtin = resolveBuiltin(t.type);
+      if (builtin) {
+        out.push({ ...builtin });
+        continue;
+      }
+
+      // Skip non-function tools (e.g. googleSearch/codeExecution/web_search_preview)
+      if (t.type !== 'function') continue;
+
+      const fn = t.function && typeof t.function === 'object' ? t.function : null;
+      const name = fn && fn.name ? String(fn.name) : (t.name ? String(t.name) : '');
+      if (!name) continue;
+      const description = fn && fn.description !== undefined ? fn.description : (t.description !== undefined ? t.description : undefined);
+      const params = fn && fn.parameters !== undefined ? fn.parameters : (t.parameters !== undefined ? t.parameters : undefined);
+      // Anthropic expects input_schema (JSON schema). If missing, default to empty object schema.
+      const input_schema = (params && typeof params === 'object') ? params : { type: 'object', properties: {}, additionalProperties: true };
+      out.push({
+        name,
+        ...(description ? { description: String(description) } : {}),
+        input_schema,
+      });
+    }
+    return out.length > 0 ? out : null;
+  }
+
+  _convertMessagesToAnthropic(openAIMessages) {
+    // Convert OpenAI chat message list into Anthropic messages.
+    // Anthropic does not use role:'system' within messages; we pass system separately.
+    // We also represent tool outputs via { role:'user', content:[{type:'tool_result', ...}] }.
+    const msgs = Array.isArray(openAIMessages) ? openAIMessages : [];
+    const out = [];
+    // Claude validates the tool protocol strictly:
+    // - every `tool_result` must reference a `tool_use_id` that appeared in a `tool_use` block
+    //   in the *immediately previous assistant message*
+    // - `tool_use` blocks must be carried in assistant message content blocks
+    // Our internal history is OpenAI-style: assistant messages have `tool_calls`, and tool outputs
+    // are separate `{ role:'tool', tool_call_id, content }` messages.
+    // So we must (a) emit assistant `tool_use` blocks, and (b) only emit `tool_result` blocks that
+    // correspond to the immediately previous assistant turn.
+    let pendingToolUses = null; // Map tool_call_id -> tool_use block
+    for (const m of msgs) {
+      if (!m || typeof m !== 'object') continue;
+      const role = m.role;
+      if (role === 'system') continue;
+
+      if (role === 'assistant') {
+        const blocks = [];
+        const text = (m.content === null || m.content === undefined) ? '' : String(m.content);
+        if (text) blocks.push({ type: 'text', text });
+
+        // Carry tool calls as Anthropic tool_use blocks.
+        pendingToolUses = null;
+        const toolCalls = Array.isArray(m.tool_calls)
+          ? m.tool_calls
+          : (Array.isArray(m.tool_call) ? m.tool_call : (m.tool_call ? [m.tool_call] : null));
+
+        if (toolCalls && toolCalls.length > 0) {
+          pendingToolUses = new Map();
+          for (const tc of toolCalls) {
+            if (!tc || typeof tc !== 'object') continue;
+            const id = tc.id ? String(tc.id) : '';
+            const fn = tc.function && typeof tc.function === 'object' ? tc.function : null;
+            const name = fn && fn.name ? String(fn.name) : '';
+            if (!id || !name) continue;
+            let input = {};
+            const args = fn && fn.arguments !== undefined ? fn.arguments : undefined;
+            if (typeof args === 'string' && args.trim()) {
+              try { input = JSON.parse(args); } catch { input = {}; }
+            } else if (args && typeof args === 'object') {
+              input = args;
+            }
+            const b = { type: 'tool_use', id, name, input };
+            blocks.push(b);
+            pendingToolUses.set(id, b);
+          }
+        }
+
+        // Drop completely empty assistant messages.
+        if (blocks.length > 0) out.push({ role: 'assistant', content: blocks });
+        continue;
+      }
+
+      if (role === 'user') {
+        const text = (m.content === null || m.content === undefined) ? '' : String(m.content);
+        if (!text) continue;
+        out.push({ role: 'user', content: [{ type: 'text', text }] });
+        continue;
+      }
+
+      if (role === 'tool') {
+        // Tool output from our internal tool execution -> send to Claude as tool_result.
+        const tool_use_id = m.tool_call_id ? String(m.tool_call_id) : null;
+        const content = (m.content === null || m.content === undefined) ? '' : String(m.content);
+
+        // Only include tool_result if it corresponds to a tool_use in the immediately previous assistant message.
+        if (tool_use_id && pendingToolUses && pendingToolUses.has(tool_use_id)) {
+          out.push({
+            role: 'user',
+            content: [{ type: 'tool_result', tool_use_id, content }],
+          });
+        } else {
+          // If the pairing is missing, sending tool_result would 400. Best-effort: include as plain text.
+          if (content) out.push({ role: 'user', content: [{ type: 'text', text: content }] });
+        }
+        continue;
+      }
+    }
+    return out;
+  }
+
+  _extractToolCallsFromAnthropicContent(contentBlocks) {
+    // Return OpenAI-like tool_calls array.
+    const blocks = Array.isArray(contentBlocks) ? contentBlocks : [];
+    const toolCalls = [];
+    for (const b of blocks) {
+      if (!b || typeof b !== 'object') continue;
+      if (b.type !== 'tool_use') continue;
+      const id = b.id ? String(b.id) : '';
+      const name = b.name ? String(b.name) : '';
+      const input = (b.input && typeof b.input === 'object') ? b.input : {};
+      if (!id || !name) continue;
+      toolCalls.push({
+        id,
+        type: 'function',
+        function: {
+          name,
+          arguments: JSON.stringify(input),
+        },
+      });
+    }
+    return toolCalls.length > 0 ? toolCalls : null;
+  }
+
+  _extractTextFromAnthropicContent(contentBlocks) {
+    const blocks = Array.isArray(contentBlocks) ? contentBlocks : [];
+    let text = '';
+    for (const b of blocks) {
+      if (!b || typeof b !== 'object') continue;
+      if (b.type === 'text' && typeof b.text === 'string') {
+        text += b.text;
+      }
+    }
+    return text || null;
+  }
+
+  _mapAnthropicUsage(usage) {
+    // Map to OpenAI-ish shape used elsewhere (best-effort)
+    if (!usage || typeof usage !== 'object') return null;
+    // Newer Anthropic responses use input_tokens/output_tokens.
+    const input = usage.input_tokens;
+    const output = usage.output_tokens;
+    if (typeof input === 'number' || typeof output === 'number') {
+      return {
+        input_tokens: typeof input === 'number' ? input : undefined,
+        output_tokens: typeof output === 'number' ? output : undefined,
+        total_tokens: (typeof input === 'number' && typeof output === 'number') ? (input + output) : undefined,
+      };
+    }
+    return { ...usage };
+  }
+
+  async _completeNoStreamAnthropic(params, requestOptions = undefined) {
+    const max_iterations = params.max_iterations || 100;
+    const tools = params.tools;
+    delete params.max_iterations;
+
+    let iteration = 0;
+    let lastResult = null;
+    let accumulatedUsage = null;
+
+    const model = this._ensureModelResolved();
+    const client = this.getClient();
+    const modelId = this._coerceAnthropicModelId(model.model);
+
+    while (iteration < max_iterations) {
+      if (this._isCancelled()) throw new Error('Operation cancelled');
+
+      // Build OpenAI-format messages (respects system_prompt_file refresh)
+      const openAIMessages = this.chat.getMessagesForAPI();
+      const system = this._extractSystemPromptFromMessages(openAIMessages);
+      const anthropicMessages = this._convertMessagesToAnthropic(openAIMessages);
+
+      const anthropicTools = tools ? this._toolsToAnthropicFormat(tools) : null;
+
+      const body = {
+        model: modelId,
+        max_tokens: (params.max_tokens !== null && params.max_tokens !== undefined) ? params.max_tokens : 1024,
+        messages: anthropicMessages,
+        ...(system ? { system } : {}),
+        ...(anthropicTools ? { tools: anthropicTools } : {}),
+      };
+      if (params.temperature !== null && params.temperature !== undefined) {
+        body.temperature = params.temperature;
+      }
+
+      // NOTE: reasoning_effort is provider-specific; Anthropic has "thinking" for some models.
+      // We intentionally do not map viib-etch reasoning_effort here by default.
+
+      const requestStartTime = Date.now();
+      await this.callHook('onRequestStart');
+      // Anthropic SDK supports abort via signal.
+      const resp = await client.messages.create(body, requestOptions);
+      const requestDoneTime = Date.now();
+      await this.callHook('onRequestDone', requestDoneTime - requestStartTime);
+
+      if (resp && resp.usage) {
+        accumulatedUsage = this._mergeUsage(accumulatedUsage, this._mapAnthropicUsage(resp.usage));
+      }
+
+      const contentBlocks = resp && resp.content ? resp.content : [];
+      const toolCalls = this._extractToolCallsFromAnthropicContent(contentBlocks);
+      const text = this._extractTextFromAnthropicContent(contentBlocks);
+
+      const assistantMessage = {
+        role: 'assistant',
+        content: text || '',
+        reasoning: null,
+        tool_calls: toolCalls,
+      };
+
+      let firstEventAfterRequestDone = true;
+      if (text) {
+        const responseStartTime = Date.now();
+        const sinceRequestDone = firstEventAfterRequestDone ? Date.now() - requestDoneTime : null;
+        await this.callHook('onResponseStart', sinceRequestDone);
+        firstEventAfterRequestDone = false;
+        await this.callHook('onResponseData', text);
+        await this.callHook('onResponseDone', text, Date.now() - responseStartTime);
+      }
+
+      this.chat.addMessage(assistantMessage);
+      if (assistantMessage.content) await this._generateTitle();
+
+      lastResult = {
+        message: { role: 'assistant', content: assistantMessage.content, tool_calls: toolCalls },
+        content: assistantMessage.content,
+        tool_calls: toolCalls,
+        reasoning: null,
+        usage: accumulatedUsage,
+        finish_reason: resp && resp.stop_reason ? resp.stop_reason : null,
+      };
+
+      if (this._isCancelled()) throw new Error('Operation cancelled');
+
+      if (toolCalls && toolCalls.length > 0) {
+        await this._executeToolCallsInternal({ tool_calls: toolCalls });
+        iteration++;
+        continue;
+      }
+      return lastResult;
+    }
+    return lastResult;
+  }
+
+  async _completeStreamAnthropic(params, requestOptions = undefined) {
+    const max_iterations = params.max_iterations || 100;
+    const tools = params.tools;
+    delete params.max_iterations;
+
+    let iteration = 0;
+    let lastResult = null;
+
+    const model = this._ensureModelResolved();
+    const client = this.getClient();
+    const modelId = this._coerceAnthropicModelId(model.model);
+
+    while (iteration < max_iterations) {
+      if (this._isCancelled()) throw new Error('Operation cancelled');
+
+      const openAIMessages = this.chat.getMessagesForAPI();
+      const system = this._extractSystemPromptFromMessages(openAIMessages);
+      const anthropicMessages = this._convertMessagesToAnthropic(openAIMessages);
+      const anthropicTools = tools ? this._toolsToAnthropicFormat(tools) : null;
+
+      const body = {
+        model: modelId,
+        max_tokens: (params.max_tokens !== null && params.max_tokens !== undefined) ? params.max_tokens : 1024,
+        messages: anthropicMessages,
+        stream: true,
+        ...(system ? { system } : {}),
+        ...(anthropicTools ? { tools: anthropicTools } : {}),
+      };
+      if (params.temperature !== null && params.temperature !== undefined) {
+        body.temperature = params.temperature;
+      }
+
+      const requestStartTime = Date.now();
+      await this.callHook('onRequestStart');
+
+      const stream = await client.messages.stream(body, requestOptions);
+
+      const requestDoneTime = Date.now();
+      await this.callHook('onRequestDone', requestDoneTime - requestStartTime);
+
+      let fullContent = '';
+      const toolUseBlocks = [];
+      let hasStartedResponse = false;
+      let responseStartTime = null;
+      let firstEventAfterRequestDone = true;
+
+      // The SDK stream yields events; we handle the common ones.
+      for await (const event of stream) {
+        if (this._isCancelled()) throw new Error('Operation cancelled');
+        if (!event || typeof event !== 'object') continue;
+
+        // Many events include a delta. We rely on type tags.
+        if (event.type === 'content_block_delta' && event.delta && event.delta.type === 'text_delta') {
+          const chunk = event.delta.text || '';
+          if (chunk) {
+            if (!hasStartedResponse) {
+              responseStartTime = Date.now();
+              const sinceRequestDone = firstEventAfterRequestDone ? Date.now() - requestDoneTime : null;
+              await this.callHook('onResponseStart', sinceRequestDone);
+              firstEventAfterRequestDone = false;
+              hasStartedResponse = true;
+            }
+            fullContent += chunk;
+            await this.callHook('onResponseData', chunk);
+          }
+          continue;
+        }
+
+        if (event.type === 'content_block_start' && event.content_block && event.content_block.type === 'tool_use') {
+          toolUseBlocks.push(event.content_block);
+          continue;
+        }
+
+        if (event.type === 'content_block_delta' && event.delta && event.delta.type === 'input_json_delta') {
+          // Tool input JSON is streamed; accumulate into the last tool_use block.
+          const delta = event.delta.partial_json || '';
+          const last = toolUseBlocks.length ? toolUseBlocks[toolUseBlocks.length - 1] : null;
+          if (last) {
+            if (!last.__partial_json) last.__partial_json = '';
+            last.__partial_json += String(delta);
+          }
+          continue;
+        }
+      }
+
+      if (hasStartedResponse && responseStartTime !== null) {
+        await this.callHook('onResponseDone', fullContent, Date.now() - responseStartTime);
+      }
+
+      // Finalize tool_use blocks: parse partial JSON into input if needed.
+      const finalizedBlocks = toolUseBlocks.map((b) => {
+        if (!b || typeof b !== 'object') return b;
+        if (b.type !== 'tool_use') return b;
+        if (b.input && typeof b.input === 'object') return b;
+        const pj = b.__partial_json;
+        if (typeof pj === 'string' && pj.trim()) {
+          try {
+            const parsed = JSON.parse(pj);
+            return { ...b, input: parsed };
+          } catch {
+            // Leave input empty if parse fails.
+            return { ...b, input: {} };
+          }
+        }
+        return { ...b, input: {} };
+      });
+
+      const toolCalls = this._extractToolCallsFromAnthropicContent(finalizedBlocks);
+
+      const assistantMessage = {
+        role: 'assistant',
+        content: fullContent || '',
+        reasoning: null,
+        tool_calls: toolCalls,
+      };
+      this.chat.addMessage(assistantMessage);
+      if (assistantMessage.content) await this._generateTitle();
+
+      lastResult = assistantMessage;
+
+      if (this._isCancelled()) throw new Error('Operation cancelled');
+
+      if (toolCalls && toolCalls.length > 0) {
+        await this._executeToolCallsInternal({ tool_calls: toolCalls });
+        iteration++;
+        continue;
+      }
+      return lastResult;
+    }
+
+    return lastResult;
   }
   
   // Convert OpenAI message format to Google Gemini format

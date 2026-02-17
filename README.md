@@ -132,7 +132,15 @@ Models are configured in `viib-etch-models.json`:
 
 API keys can be provided via:
 1. **File path** (recommended): Set `api_key_file` in model config
-2. **Environment variable**: `OPENAI_API_KEY` for OpenAI models
+2. **Environment variable**:
+   - `OPENAI_API_KEY` for OpenAI / OpenAI-compatible models (including OpenRouter)
+   - `GEMINI_API_KEY` for Google Gemini models
+   - `ANTHROPIC_API_KEY` for Anthropic Claude models
+#### Anthropic baseUrl note
+
+If you set `baseUrl` for Claude models, use `https://api.anthropic.com` (no trailing `/v1`).
+If you provide `https://api.anthropic.com/v1`, viib-etch will normalize it automatically.
+
 3. **Direct config**: `api_key` in model config (not recommended)
 
 **File path resolution for `api_key_file`:**

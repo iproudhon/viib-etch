@@ -1636,10 +1636,21 @@ function getToolDefinitions(filePath, tool_names = []) {
   // Pass it as an option to `ChatLLM.complete()` / `ChatLLM.send()` instead.
   const builtinTools = [];
   for (const name of tool_names) {
-    if (name === 'web_search_preview' || name === 'web_search_preview_2025_03_11' || name === "googleSearch" || name === "codeExecution") {
+    // OpenAI built-in tools
+    if (name === 'web_search_preview' || name === 'web_search_preview_2025_03_11') {
       builtinTools.push({ type: name });
+      continue;
     }
-    // Future built-ins could go here (file_search, code_interpreter, etc.) once you decide on their configs.
+    // Gemini built-in tools
+    if (name === 'googleSearch' || name === 'codeExecution') {
+      builtinTools.push({ type: name });
+      continue;
+    }
+    // Anthropic built-in tools (versioned type strings for the Anthropic API)
+    if (name === 'bash' || name === 'text_editor' || name === 'web_search' || name === 'code_execution') {
+      builtinTools.push({ type: name });
+      continue;
+    }
   }
 
   const customTools = definitions.filter(tool => tool_names.includes(tool.function.name));
